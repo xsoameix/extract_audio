@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 enum {
   ERR_MEM = 1,
@@ -151,6 +152,19 @@ struct box_top {
   struct box_moov moov;
 };
 
+struct box_info {
+  unsigned int size;
+  char type[4];
+  long pos;
+};
+
+typedef int (* box_func)(FILE * file, struct box_info * info, box_t p_box);
+
+struct box_func_pair {
+  const char * name;
+  box_func func;
+};
+
 static const char *
 err_to_str(int i) {
   static const char * errors[] = {
@@ -158,7 +172,7 @@ err_to_str(int i) {
     "Memory error",
     "IO error",
     "Unknown box",
-    "Box size is too big",
+    "Box size is erroneous",
     "Unknown handler type",
     "Unknown nal unit type",
     "Unable to read exp golomb code",
@@ -405,80 +419,47 @@ read_mat(int * matrix, FILE * file) {
   return 0;
 }
 
-struct box_func {
-  const char * name;
-  int (* func)(FILE * file, unsigned int box_size, box_t p_box);
-};
-
-
 static int
-dispatch(FILE * file, struct box_func * funcs, unsigned int p_box_size,
-         box_t p_box) {
-  long pos;
-  long now;
-  unsigned int box_size;
-  char box_type[4];
-  int found;
+read_box(FILE * file, struct box_info * info, box_t box,
+         struct box_func_pair * pairs) {
+  struct box_info child;
+  size_t i;
   int ret;
-  int i;
-
-  if ((ret = get_pos(&pos, file)) != 0)
-    return ret;
 
   for (;;) {
-
-    if ((ret = get_pos(&now, file)) != 0)
+    if ((ret = get_pos(&child.pos, file)) != 0)
       return ret;
 
-    /* if this box is not the top level box */
-    if (p_box_size != (unsigned int) -1) {
+    if ((unsigned int) (child.pos - info->pos) > info->size)
+      return ERR_BOX_SIZE;
+    if ((unsigned int) (child.pos - info->pos) == info->size)
+      return 0;
 
-      if ((unsigned long) now > (unsigned long) pos + p_box_size)
-        return ERR_BOX_SIZE;
+    if ((ret = read_u32(&child.size, file)) != 0)
+      return ret;
+    if ((ret = read_c32(child.type, file)) != 0)
+      return ret;
 
-      /* return if no space for child boxes */
-      if ((unsigned long) now == (unsigned long) pos + p_box_size)
+    for (i = 0; pairs[i].name != NULL; i++)
+      if (strncmp(pairs[i].name, child.type, 4) == 0)
         break;
-    }
 
-    /* box size */
-    /* box type */
-    if ((ret = read_u32(&box_size, file)) != 0) {
+    indent(0); printf("[%.4s %u]\n", child.type, child.size);
+    indent(1);
 
-      /* if this box is the top level box */
-      if (p_box_size == (unsigned int) -1)
-        return 0;
-
-      return ret;
-    }
-    if ((ret = read_c32(box_type, file)) != 0)
-      return ret;
-
-    indent(0); printf("[box size]:  %u\n", box_size);
-    indent(0); printf("[box type]:  %.4s\n", box_type);
-
-    found = 0;
-    for (i = 0; funcs[i].name != NULL; i++) {
-      if (strncmp(funcs[i].name, box_type, 4) == 0) {
-        indent(1);
-        if ((ret = funcs[i].func(file, box_size - 8, p_box)) != 0)
-          return ret;
-        indent(-1);
-        found = 1;
-        break;
-      }
-    }
-    if (!found)
+    if (pairs[i].name == NULL)
       return ERR_UNK_BOX;
+
+    if ((ret = pairs[i].func(file, &child, box)) != 0)
+      return ret;
+
+    indent(-1);
   }
-  indent(0); printf("[        ]:  %u\n", p_box_size);
-  return 0;
 }
 
 static int
-read_ftyp(FILE * file, unsigned int box_size, box_t p_box) {
+read_ftyp(FILE * file, struct box_info * info, box_t p_box) {
   long pos;
-  long now;
 
   char m_brand[4]; /* major brand */
   unsigned int m_version; /* minor version */
@@ -493,16 +474,15 @@ read_ftyp(FILE * file, unsigned int box_size, box_t p_box) {
   ret = 0;
   c_brands = NULL;
 
-  if ((ret = get_pos(&pos, file)) != 0 ||
-      (ret = read_c32(m_brand, file)) != 0 ||
+  if ((ret = read_c32(m_brand, file)) != 0 ||
       (ret = read_u32(&m_version, file)) != 0 ||
-      (ret = get_pos(&now, file)) != 0)
+      (ret = get_pos(&pos, file)) != 0)
     goto exit;
 
   attr("major_brand:"); printf("%.4s\n", m_brand);
   attr("minor_version:"); printf("%u\n", m_version);
 
-  len = (box_size - (unsigned int) (now - pos)) / 4;
+  len = (info->size - (unsigned int) (pos - info->pos)) / 4;
   if (len > 0) {
 
     /* compatible brands */
@@ -523,7 +503,7 @@ exit:
 }
 
 static int
-read_mvhd(FILE * file, unsigned int box_size, box_t p_box) {
+read_mvhd(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
   unsigned int c_time;
@@ -538,7 +518,7 @@ read_mvhd(FILE * file, unsigned int box_size, box_t p_box) {
   struct box_mvhd * mvhd;
   int ret;
 
-  (void) box_size;
+  (void) info;
 
   if ((ret = read_ver(&version, &flags, file)) != 0 ||
       (ret = read_u32(&c_time, file)) != 0 ||
@@ -585,7 +565,7 @@ read_mvhd(FILE * file, unsigned int box_size, box_t p_box) {
 }
 
 static int
-read_tkhd(FILE * file, unsigned int box_size, box_t p_box) {
+read_tkhd(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
   unsigned char track_enabled;
@@ -605,7 +585,7 @@ read_tkhd(FILE * file, unsigned int box_size, box_t p_box) {
   struct box_tkhd * tkhd;
   int ret;
 
-  (void) box_size;
+  (void) info;
 
   if ((ret = read_ver(&version, &flags, file)) != 0 ||
       (ret = read_u32(&c_time, file)) != 0 ||
@@ -669,7 +649,7 @@ read_tkhd(FILE * file, unsigned int box_size, box_t p_box) {
 }
 
 static int
-read_mdhd(FILE * file, unsigned int box_size, box_t p_box) {
+read_mdhd(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
   unsigned int c_time;
@@ -681,7 +661,7 @@ read_mdhd(FILE * file, unsigned int box_size, box_t p_box) {
   struct box_mdhd * mdhd;
   int ret;
 
-  (void) box_size;
+  (void) info;
 
   if ((ret = read_ver(&version, &flags, file)) != 0 ||
       (ret = read_u32(&c_time, file)) != 0 ||
@@ -713,7 +693,7 @@ read_mdhd(FILE * file, unsigned int box_size, box_t p_box) {
 }
 
 static int
-read_hdlr(FILE * file, unsigned int box_size, box_t p_box) {
+read_hdlr(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
   char type[4]; /* handler type */
@@ -721,7 +701,7 @@ read_hdlr(FILE * file, unsigned int box_size, box_t p_box) {
   struct box_hdlr * hdlr;
   int ret;
 
-  (void) box_size;
+  (void) info;
 
   if ((ret = read_ver(&version, &flags, file)) != 0 ||
       (ret = skip(file, 4)) != 0 || /* pre defined */
@@ -757,8 +737,7 @@ read_data_entry(FILE * file, struct box_data_entry * entry) {
       (ret = read_c32(box_type, file)) != 0)
     goto exit;
 
-  indent(0); printf("[box size]:  %u\n", box_size);
-  indent(0); printf("[box type]:  %.4s\n", box_type);
+  indent(0); printf("[%.4s %u]\n", box_type, box_size);
 
   indent(1);
 
@@ -817,7 +796,7 @@ free_data_entry(struct box_data_entry * entry) {
 }
 
 static int
-read_dref(FILE * file, unsigned int box_size, box_t p_box) {
+read_dref(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
   unsigned int entry_count;
@@ -827,7 +806,7 @@ read_dref(FILE * file, unsigned int box_size, box_t p_box) {
   struct box_dref * dref;
   int ret;
 
-  (void) box_size;
+  (void) info;
 
   ret = 0;
 
@@ -867,14 +846,14 @@ exit:
 }
 
 static int
-read_dinf(FILE * file, unsigned int box_size, box_t p_box) {
-  static struct box_func funcs[] = {
+read_dinf(FILE * file, struct box_info * info, box_t p_box) {
+  static struct box_func_pair funcs[] = {
     {"dref", read_dref},
     {NULL, NULL}
   };
   box_t box;
   box.dinf = &p_box.mdia->minf.dinf;
-  return dispatch(file, funcs, box_size, box);
+  return read_box(file, info, box, funcs);
 }
 
 static int
@@ -914,8 +893,7 @@ read_visual_sample_entry(FILE * file, struct box_visual_sample_entry * entry) {
 
   compressorname[len] = '\0';
 
-  indent(0); printf("[box size]:  %u\n", box_size);
-  indent(0); printf("[box type]:  %.4s\n", box_type);
+  indent(0); printf("[%.4s %u]\n", box_type, box_size);
 
   indent(1);
 
@@ -1624,14 +1602,13 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
   }
 
 free:
-  if (ret)
-    mem_free(rbsp);
+  mem_free(rbsp);
 exit:
   return ret;
 }
 
 static int
-read_avcc(FILE * file, unsigned int box_size, box_t p_box) {
+read_avcc(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char conf_version; /* configuration version */
   unsigned char profile_idc; /* AVC profile indication */
   unsigned char profile_comp; /* profile compatibility */
@@ -1661,7 +1638,7 @@ read_avcc(FILE * file, unsigned int box_size, box_t p_box) {
   unsigned int i;
   int ret;
 
-  (void) box_size;
+  (void) info;
   (void) p_box;
 
   ret = 0;
@@ -1730,7 +1707,7 @@ exit:
 }
 
 static int
-read_stsd(FILE * file, unsigned int box_size, box_t p_box) {
+read_stsd(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
   unsigned int entry_count;
@@ -1741,13 +1718,11 @@ read_stsd(FILE * file, unsigned int box_size, box_t p_box) {
   struct box_hdlr * hdlr;
   struct box_stsd * stsd;
   box_t box;
-  static struct box_func funcs[] = {
+  static struct box_func_pair funcs[] = {
     {"avcC", read_avcc},
     {NULL, NULL}
   };
   int ret;
-
-  (void) box_size;
 
   ret = 0;
 
@@ -1785,7 +1760,7 @@ free_entry:
   }
 
   box.stsd = &p_box.mdia->minf.stbl.stsd;
-  if ((ret = dispatch(file, funcs, box_size, box)) != 0)
+  if ((ret = read_box(file, info, box, funcs)) != 0)
     goto free;
 
   stsd = box.stsd;
@@ -1802,27 +1777,27 @@ exit:
 }
 
 static int
-read_stbl(FILE * file, unsigned int box_size, box_t p_box) {
-  static struct box_func funcs[] = {
+read_stbl(FILE * file, struct box_info * info, box_t p_box) {
+  static struct box_func_pair funcs[] = {
     {"stsd", read_stsd},
     {NULL, NULL}
   };
-  return dispatch(file, funcs, box_size, p_box);
+  return read_box(file, info, p_box, funcs);
 }
 
 static int
-read_minf(FILE * file, unsigned int box_size, box_t p_box) {
-  static struct box_func funcs[] = {
+read_minf(FILE * file, struct box_info * info, box_t p_box) {
+  static struct box_func_pair funcs[] = {
     {"dinf", read_dinf},
     {"stbl", read_stbl},
     {NULL, NULL}
   };
-  return dispatch(file, funcs, box_size, p_box);
+  return read_box(file, info, p_box, funcs);
 }
 
 static int
-read_mdia(FILE * file, unsigned int box_size, box_t p_box) {
-  static struct box_func funcs[] = {
+read_mdia(FILE * file, struct box_info * info, box_t p_box) {
+  static struct box_func_pair funcs[] = {
     {"mdhd", read_mdhd},
     {"hdlr", read_hdlr},
     {"minf", read_minf},
@@ -1830,12 +1805,12 @@ read_mdia(FILE * file, unsigned int box_size, box_t p_box) {
   };
   box_t box;
   box.mdia = &p_box.trak->mdia;
-  return dispatch(file, funcs, box_size, box);
+  return read_box(file, info, box, funcs);
 }
 
 static int
-read_trak(FILE * file, unsigned int box_size, box_t p_box) {
-  static struct box_func funcs[] = {
+read_trak(FILE * file, struct box_info * info, box_t p_box) {
+  static struct box_func_pair funcs[] = {
     {"tkhd", read_tkhd},
     {"mdia", read_mdia},
     {NULL, NULL}
@@ -1850,31 +1825,39 @@ read_trak(FILE * file, unsigned int box_size, box_t p_box) {
     return ret;
   moov->trak_len++;
 
+  /* moov->trak would be freed at the top */
   box.trak = &moov->trak[moov->trak_len - 1];
-  return dispatch(file, funcs, box_size, box);
+  return read_box(file, info, box, funcs);
 }
 
-static int
-read_moov(FILE * file, unsigned int box_size, box_t p_box) {
-  static struct box_func funcs[] = {
+int
+read_moov(FILE * file, struct box_info * info, box_t p_box) {
+  static struct box_func_pair funcs[] = {
     {"mvhd", read_mvhd},
     {"trak", read_trak},
     {NULL, NULL}
   };
   box_t box;
   box.moov = &p_box.top->moov;
-  return dispatch(file, funcs, box_size, box);
+  return read_box(file, info, box, funcs);
+}
+
+int
+read_file(FILE * file, struct box_info * info, box_t box) {
+  static struct box_func_pair funcs[] = {
+    {"ftyp", read_ftyp},
+    {"moov", read_moov},
+    {NULL, NULL}
+  };
+  return read_box(file, info, box, funcs);
 }
 
 int
 main(int argc, char ** argv) {
   const char * fname;
   FILE * file;
-  static struct box_func funcs[] = {
-    {"ftyp", read_ftyp},
-    {"moov", read_moov},
-    {NULL, NULL}
-  };
+  struct box_info info;
+  long size;
   struct box_top top;
   box_t box;
   unsigned int i;
@@ -1892,22 +1875,41 @@ main(int argc, char ** argv) {
     goto exit;
   }
 
+  if (fseek(file, 0, SEEK_END) == -1) {
+    ret = ERR_IO;
+    goto exit;
+  }
+
+  if ((ret = get_pos(&size, file)) != 0)
+    goto exit;
+
+  if (fseek(file, 0, SEEK_SET) == -1) {
+    ret = ERR_IO;
+    goto exit;
+  }
+
+  info.pos = 0;
+  info.size = (unsigned int) size;
+  memcpy(info.type, "file", 4);
+
   box.top = &top;
 
   top.ftyp.c_brands = NULL;
   top.moov.trak = NULL;
   top.moov.trak_len = 0;
 
-  ret = dispatch(file, funcs, (unsigned int) -1, box);
+  ret = read_file(file, &info, box);
 
   for (i = 0; i < top.moov.trak_len; i++) {
-    for (j = 0; j < top.moov.trak[i].mdia.minf.stbl.stsd.entry_count; j++)
-      free_visual_sample_entry(
-          top.moov.trak[i].mdia.minf.stbl.stsd.entry.v_entry);
-    for (j = 0; j < top.moov.trak[i].mdia.minf.dinf.dref.entry_count; j++)
-      free_data_entry(&top.moov.trak[i].mdia.minf.dinf.dref.entry[j]);
-    mem_free(top.moov.trak[i].mdia.minf.dinf.dref.entry);
-    mem_free(top.moov.trak[i].mdia.hdlr.name);
+    struct box_trak * trak;
+    trak = top.moov.trak;
+    for (j = 0; j < trak[i].mdia.minf.stbl.stsd.entry_count; j++)
+      free_visual_sample_entry(&trak[i].mdia.minf.stbl.stsd.entry.v_entry[j]);
+    mem_free(trak[i].mdia.minf.stbl.stsd.entry.v_entry);
+    for (j = 0; j < trak[i].mdia.minf.dinf.dref.entry_count; j++)
+      free_data_entry(&trak[i].mdia.minf.dinf.dref.entry[j]);
+    mem_free(trak[i].mdia.minf.dinf.dref.entry);
+    mem_free(trak[i].mdia.hdlr.name);
   }
 
   mem_free(top.moov.trak);
