@@ -205,9 +205,80 @@ indent(int i) {
 
 static void
 attr(const char * name) {
+  enum { ATTR_LEN = 25 };
+  static char blank[80 + 1] = {0};
+  unsigned int i;
+  size_t len;
+
+  if (blank[0] == 0) {
+    for (i = 0; i < sizeof(blank); i++)
+      blank[i] = ' ';
+    blank[80] = '\0';
+  }
+
   indent(0);
-  printf("%-26s ", name);
+  len = strlen(name);
+  if (len >= ATTR_LEN)
+    printf("%s: ", name);
+  else if (len >= 1)
+    printf("%s:%s ", name, &blank[80-ATTR_LEN+len]);
+  else
+    printf("%s ", &blank[80-ATTR_LEN-1]);
 }
+
+static void
+attr_c24(const char * name, const char * c) {
+  attr(name); printf("%.3s\n", c);
+}
+
+#define ATTR_C24(name) attr_c24(#name, (name));
+
+static void
+attr_c32(const char * name, const char * c) {
+  attr(name); printf("%.4s\n", c);
+}
+
+static void
+attr_str(const char * name, const char * str) {
+  attr(name); printf("%s\n", str);
+}
+
+#define ATTR_STR(name) attr_str(#name, (name))
+
+static void
+attr_u(const char * name, unsigned int u) {
+  attr(name); printf("%u\n", u);
+}
+
+#define ATTR_U(name) attr_u(#name, (name));
+
+static void
+attr_s(const char * name, int s) {
+  attr(name); printf("%d\n", s);
+}
+
+#define ATTR_S(name) attr_s(#name, (name));
+
+static void
+attr_s_8(const char * name, int s) {
+  attr(name); printf("%d.%x\n", s >> 8, s & 0xff);
+}
+
+#define ATTR_S_8(name) attr_s_8(#name, (name));
+
+static void
+attr_s_16(const char * name, int s) {
+  attr(name); printf("%d.%x\n", s >> 16, s & 0xffff);
+}
+
+#define ATTR_S_16(name) attr_s_16(#name, (name));
+
+static void
+attr_u_16(const char * name, unsigned int u) {
+  attr(name); printf("%u.%x\n", u >> 16, u & 0xffff);
+}
+
+#define ATTR_U_16(name) attr_u_16(#name, (name));
 
 static int
 mem_alloc(void * ret, size_t size) {
@@ -479,8 +550,8 @@ read_ftyp(FILE * file, struct box_info * info, box_t p_box) {
       (ret = get_pos(&pos, file)) != 0)
     goto exit;
 
-  attr("major_brand:"); printf("%.4s\n", m_brand);
-  attr("minor_version:"); printf("%u\n", m_version);
+  attr_c32("major_brand", m_brand);
+  attr_u("minor_version", m_version);
 
   len = (info->size - (unsigned int) (pos - info->pos)) / 4;
   if (len > 0) {
@@ -490,9 +561,8 @@ read_ftyp(FILE * file, struct box_info * info, box_t p_box) {
         (ret = read_ary(c_brands, sizeof(c_brands[0]), len, file)) != 0)
       goto exit;
 
-    for (i = 0; i < len; i++) {
-      attr("compatible brand:"); printf("%.4s\n", c_brands[i]);
-    }
+    for (i = 0; i < len; i++)
+      attr_c32("compatible brand", c_brands[i]);
   }
   ftyp = &p_box.top->ftyp;
   memcpy(ftyp->m_brand, m_brand, sizeof(m_brand));
@@ -533,22 +603,22 @@ read_mvhd(FILE * file, struct box_info * info, box_t p_box) {
       (ret = read_u32(&next_track_id, file)) != 0)
     return ret;
 
-  attr("creation time:"); printf("%u\n", c_time);
-  attr("modification time:"); printf("%u\n", m_time);
-  attr("timescale:"); printf("%u\n", timescale);
-  attr("duration:"); printf("%u\n", duration);
-  attr("rate:"); printf("%d.%x\n", rate >> 16, rate & 0xffff);
-  attr("volume:"); printf("%d.%x\n", volume >> 8, volume & 0xff);
+  attr_u("creation time", c_time);
+  attr_u("modification time", m_time);
+  ATTR_U(timescale);
+  ATTR_U(duration);
+  ATTR_S_16(rate);
+  ATTR_S_8(volume);
 
   for (i = 0; i < 3; i++) {
-    attr(i == 0 ? "matrix:" : "       ");
+    attr(i == 0 ? "matrix" : "");
     printf("%d.%x %d.%x %d.%x\n",
            matrix[i] >> 16, matrix[i] & 0xffff,
            matrix[i+3] >> 16, matrix[i+3] & 0xffff,
            matrix[i+6] >> 30, matrix[i+6] & 0x3fffffff);
   }
 
-  attr("next_track_id:"); printf("%u\n", next_track_id);
+  ATTR_U(next_track_id);
 
   mvhd = &p_box.moov->mvhd;
   mvhd->c_time = c_time;
@@ -607,27 +677,27 @@ read_tkhd(FILE * file, struct box_info * info, box_t p_box) {
   track_in_movie = (flags & 0x000002) != 0;
   track_in_preview= (flags & 0x000004) != 0;
 
-  attr("track_enabled:"); printf("%u\n", track_enabled);
-  attr("track_in_movie:"); printf("%u\n", track_in_movie);
-  attr("track_in_preview:"); printf("%u\n", track_in_preview);
-  attr("creation time:"); printf("%u\n", c_time);
-  attr("modification time:"); printf("%u\n", m_time);
-  attr("track_id:"); printf("%u\n", track_id);
-  attr("duration:"); printf("%u\n", duration);
-  attr("layer:"); printf("%d\n", layer);
-  attr("alternate_group:"); printf("%d\n", alternate_group);
-  attr("volume:"); printf("%d.%x\n", volume >> 8, volume & 0xff);
+  ATTR_U(track_enabled);
+  ATTR_U(track_in_movie);
+  ATTR_U(track_in_preview);
+  attr_u("creation time", c_time);
+  attr_u("modification time", m_time);
+  ATTR_U(track_id);
+  ATTR_U(duration);
+  ATTR_S(layer);
+  ATTR_S(alternate_group);
+  ATTR_S_8(volume);
 
   for (i = 0; i < 3; i++) {
-    attr(i == 0 ? "matrix:" : "       ");
+    attr(i == 0 ? "matrix" : "");
     printf("%d.%x %d.%x %d.%x\n",
            matrix[i] >> 16, matrix[i] & 0xffff,
            matrix[i+3] >> 16, matrix[i+3] & 0xffff,
            matrix[i+6] >> 30, matrix[i+6] & 0x3fffffff);
   }
 
-  attr("width:"); printf("%u.%x\n", width >> 16, width & 0xffff);
-  attr("height:"); printf("%u.%x\n", height >> 16, height & 0xffff);
+  ATTR_U_16(width);
+  ATTR_U_16(height);
 
   tkhd = &p_box.trak->tkhd;
   tkhd->track_enabled = track_enabled;
@@ -676,11 +746,11 @@ read_mdhd(FILE * file, struct box_info * info, box_t p_box) {
   lang[1] = (char) (((lang_pack >> 5) & 0x1f) + 0x60);
   lang[2] = (char) ((lang_pack & 0x1f) + 0x60);
 
-  attr("creation time:"); printf("%u\n", c_time);
-  attr("modification time:"); printf("%u\n", m_time);
-  attr("timescale:"); printf("%u\n", timescale);
-  attr("duration:"); printf("%u\n", duration);
-  attr("lang:"); printf("%.3s\n", lang);
+  attr_u("creation time", c_time);
+  attr_u("modification time", m_time);
+  ATTR_U(timescale);
+  ATTR_U(duration);
+  ATTR_C24(lang);
 
   mdhd = &p_box.mdia->mdhd;
   mdhd->c_time = c_time;
@@ -710,8 +780,8 @@ read_hdlr(FILE * file, struct box_info * info, box_t p_box) {
       (ret = read_str(&name, file)) != 0)
     return ret;
 
-  attr("handler_type:"); printf("%.4s\n", type);
-  attr("name:"); printf("%s\n", name);
+  attr_c32("handler_type", type);
+  ATTR_STR(name);
 
   hdlr = &p_box.mdia->hdlr;
   memcpy(hdlr->type, type, sizeof(type));
@@ -751,7 +821,7 @@ read_data_entry(FILE * file, struct box_data_entry * entry) {
     goto exit;
   self_contained = flags & 0x1;
 
-  attr("self_contained:"); printf("%u\n", self_contained);
+  ATTR_U(self_contained);
 
   name = NULL;
   location = NULL;
@@ -763,7 +833,7 @@ read_data_entry(FILE * file, struct box_data_entry * entry) {
       if ((ret = read_str(&location, file)) != 0)
         goto exit;
 
-      attr("location:"); printf("%s\n", location);
+      ATTR_STR(location);
     }
   } else { /* urn */
 
@@ -772,8 +842,8 @@ read_data_entry(FILE * file, struct box_data_entry * entry) {
     if ((ret = read_str(&location, file)) != 0)
       goto free;
 
-    attr("name:"); printf("%s\n", name);
-    attr("location:"); printf("%s\n", location);
+    ATTR_STR(name);
+    ATTR_STR(location);
 free:
     if (ret) {
       mem_free(name);
@@ -814,7 +884,7 @@ read_dref(FILE * file, struct box_info * info, box_t p_box) {
       (ret = read_u32(&entry_count, file)) != 0)
     goto exit;
 
-  attr("entry_count:"); printf("%u\n", entry_count);
+  ATTR_U(entry_count);
 
   entry = NULL;
 
@@ -897,14 +967,14 @@ read_visual_sample_entry(FILE * file, struct box_visual_sample_entry * entry) {
 
   indent(1);
 
-  attr("dref_index:"); printf("%u\n", dref_index);
-  attr("width:"); printf("%u\n", width);
-  attr("height:"); printf("%u\n", height);
-  attr("h_rez:"); printf("%u.%x\n", h_rez >> 16, h_rez & 0xffff);
-  attr("v_rez:"); printf("%u.%x\n", v_rez >> 16, v_rez & 0xffff);
-  attr("frame_count:"); printf("%u\n", frame_count);
-  attr("compressorname:"); printf("%s\n", compressorname);
-  attr("depth:"); printf("%u\n", depth);
+  ATTR_U(dref_index);
+  ATTR_U(width);
+  ATTR_U(height);
+  ATTR_U_16(h_rez);
+  ATTR_U_16(v_rez);
+  ATTR_U(frame_count);
+  ATTR_STR(compressorname);
+  ATTR_U(depth);
 
   entry->dref_index = dref_index;
   entry->width = width;
@@ -1156,8 +1226,7 @@ read_vui_para(unsigned int * bi,
                       bi, pos, buf, size, bits)) != 0)
     goto exit;
 
-  attr("aspect_ratio_info_present_flag:");
-  printf("%u\n", aspect_ratio_info_present_flag);
+  ATTR_U(aspect_ratio_info_present_flag);
 
   if (aspect_ratio_info_present_flag) {
     if ((ret = read_bits(&n, 8, bi, pos, buf, size, bits)) != 0)
@@ -1166,7 +1235,7 @@ read_vui_para(unsigned int * bi,
     aspect_ratio_idc = n & 0xff;
 
     indent(1);
-    attr("aspect_ratio_idc:"); printf("%u\n", aspect_ratio_idc);
+    ATTR_U(aspect_ratio_idc);
     indent(-1);
 
     if (aspect_ratio_idc == 0xff) {
@@ -1179,8 +1248,7 @@ read_vui_para(unsigned int * bi,
                       bi, pos, buf, size, bits)) != 0)
     goto exit;
 
-  attr("overscan_info_present_flag:");
-  printf("%u\n", overscan_info_present_flag);
+  ATTR_U(overscan_info_present_flag);
 
   if (overscan_info_present_flag) {
     ret = ERR_UNK_OVERSCAN_INFO_PRESENT_FLAG;
@@ -1191,8 +1259,7 @@ read_vui_para(unsigned int * bi,
                       bi, pos, buf, size, bits)) != 0)
     goto exit;
 
-  attr("video_signal_type_present_flag:");
-  printf("%u\n", video_signal_type_present_flag);
+  ATTR_U(video_signal_type_present_flag);
 
   if (video_signal_type_present_flag) {
     ret = ERR_UNK_VIDEO_SIGNAL_TYPE_PRESENT_FLAG;
@@ -1203,8 +1270,7 @@ read_vui_para(unsigned int * bi,
                       bi, pos, buf, size, bits)) != 0)
     goto exit;
 
-  attr("chroma_loc_info_present_flag:");
-  printf("%u\n", chroma_loc_info_present_flag);
+  ATTR_U(chroma_loc_info_present_flag);
 
   if (chroma_loc_info_present_flag) {
     ret = ERR_UNK_CHROMA_LOC_INFO_PRESENT_FLAG;
@@ -1215,8 +1281,7 @@ read_vui_para(unsigned int * bi,
                       bi, pos, buf, size, bits)) != 0)
     goto exit;
 
-  attr("timing_info_present_flag:");
-  printf("%u\n", timing_info_present_flag);
+  ATTR_U(timing_info_present_flag);
 
   if (timing_info_present_flag) {
     if ((ret = read_bits(&num_units_in_tick, 32,
@@ -1228,9 +1293,9 @@ read_vui_para(unsigned int * bi,
       goto exit;
 
     indent(1);
-    attr("num_units_in_tick:"); printf("%u\n", num_units_in_tick);
-    attr("time_scale:"); printf("%u\n", time_scale);
-    attr("fixed_frame_rate_flag:"); printf("%u\n", fixed_frame_rate_flag);
+    ATTR_U(num_units_in_tick);
+    ATTR_U(time_scale);
+    ATTR_U(fixed_frame_rate_flag);
     indent(-1);
   }
 
@@ -1238,8 +1303,7 @@ read_vui_para(unsigned int * bi,
                       bi, pos, buf, size, bits)) != 0)
     goto exit;
 
-  attr("nal_hrd_para_present_flag:");
-  printf("%u\n", nal_hrd_para_present_flag);
+  ATTR_U(nal_hrd_para_present_flag);
 
   if (nal_hrd_para_present_flag) {
     ret = ERR_UNK_NAL_HRD_PARA_PRESENT_FLAG;
@@ -1250,8 +1314,7 @@ read_vui_para(unsigned int * bi,
                       bi, pos, buf, size, bits)) != 0)
     goto exit;
 
-  attr("vcl_hrd_para_present_flag:");
-  printf("%u\n", vcl_hrd_para_present_flag);
+  ATTR_U(vcl_hrd_para_present_flag);
 
   if (vcl_hrd_para_present_flag) {
     ret = ERR_UNK_VCL_HRD_PARA_PRESENT_FLAG;
@@ -1267,15 +1330,13 @@ read_vui_para(unsigned int * bi,
                       bi, pos, buf, size, bits)) != 0)
     goto exit;
 
-  attr("pic_struct_present_flag:");
-  printf("%u\n", pic_struct_present_flag);
+  ATTR_U(pic_struct_present_flag);
 
   if ((ret = read_bit(&bitstream_restriction_flag,
                       bi, pos, buf, size, bits)) != 0)
     goto exit;
 
-  attr("bitstream_restriction_flag:");
-  printf("%u\n", bitstream_restriction_flag);
+  ATTR_U(bitstream_restriction_flag);
 
   if (bitstream_restriction_flag) {
     if ((ret = read_bit(&motion_vectors_over_pic_boundaries_flag,
@@ -1295,20 +1356,13 @@ read_vui_para(unsigned int * bi,
       goto exit;
 
     indent(1);
-    attr("motion_vectors_over_pic_boundaries_flag:");
-    printf("%u\n", motion_vectors_over_pic_boundaries_flag);
-    attr("max_bytes_per_pic_denom:");
-    printf("%u\n", max_bytes_per_pic_denom);
-    attr("max_bits_per_mb_denom:");
-    printf("%u\n", max_bits_per_mb_denom);
-    attr("log2_max_mv_length_horizontal:");
-    printf("%u\n", log2_max_mv_length_horizontal);
-    attr("log2_max_mv_length_vertical:");
-    printf("%u\n", log2_max_mv_length_vertical);
-    attr("num_reorder_frames:");
-    printf("%u\n", num_reorder_frames);
-    attr("max_dec_frame_buffering:");
-    printf("%u\n", max_dec_frame_buffering);
+    ATTR_U(motion_vectors_over_pic_boundaries_flag);
+    ATTR_U(max_bytes_per_pic_denom);
+    ATTR_U(max_bits_per_mb_denom);
+    ATTR_U(log2_max_mv_length_horizontal);
+    ATTR_U(log2_max_mv_length_vertical);
+    ATTR_U(num_reorder_frames);
+    ATTR_U(max_dec_frame_buffering);
     indent(-1);
   }
 exit:
@@ -1340,8 +1394,8 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
   ref_idc = (unsigned char) ((nalu[0] >> 5) & 0x3);
   type = (unsigned char) (nalu[0] & 0x1f);
 
-  attr("nal_ref_idc:"); printf("%u\n", ref_idc);
-  attr("nal_unit_type:"); printf("%u\n", type);
+  attr_u("nal_ref_idc", ref_idc);
+  attr_u("nal_unit_type", type);
 
   rbsp = nalu;
   rbsp_size = 0;
@@ -1392,11 +1446,11 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
     c_set1_flag = (unsigned char) ((profile_comp >> 6) & 0x1);
     c_set2_flag = (unsigned char) ((profile_comp >> 5) & 0x1);
 
-    attr("profile_idc:"); printf("%u\n", profile_idc);
-    attr("constraint_set0_flag:"); printf("%u\n", c_set0_flag);
-    attr("constraint_set1_flag:"); printf("%u\n", c_set1_flag);
-    attr("constraint_set2_flag:"); printf("%u\n", c_set2_flag);
-    attr("level_idc:"); printf("%u\n", level_idc);
+    ATTR_U(profile_idc);
+    attr_u("constraint_set0_flag", c_set0_flag);
+    attr_u("constraint_set1_flag", c_set1_flag);
+    attr_u("constraint_set2_flag", c_set2_flag);
+    ATTR_U(level_idc);
 
     if (bi + 1 > rbsp_size)
       goto free;
@@ -1418,10 +1472,9 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
 
     pic_order_cnt_type = n & 0x3;
 
-    attr("seq_para_set_id:"); printf("%u\n", seq_para_set_id);
-    attr("log2_max_frame_num_minus4:");
-    printf("%u\n", log2_max_frame_num_minus4);
-    attr("pic_order_cnt_type:"); printf("%u\n", pic_order_cnt_type);
+    ATTR_U(seq_para_set_id);
+    ATTR_U(log2_max_frame_num_minus4);
+    ATTR_U(pic_order_cnt_type);
 
     if (pic_order_cnt_type == 2) {
     } else {
@@ -1441,22 +1494,18 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
       goto free;
 
-    attr("num_ref_frames:"); printf("%u\n", num_ref_frames);
-    attr("gaps_in_frame_num_value_allowed_flag:");
-    printf("%u\n", gaps_in_frame_num_value_allowed_flag);
-    attr("pic_width_in_mbs_minus_1:");
-    printf("%u\n", pic_width_in_mbs_minus_1);
-    attr("pic_height_in_mbs_minus_1:");
-    printf("%u\n", pic_height_in_mbs_minus_1);
-    attr("frame_mbs_only_flag:"); printf("%u\n", frame_mbs_only_flag);
+    ATTR_U(num_ref_frames);
+    ATTR_U(gaps_in_frame_num_value_allowed_flag);
+    ATTR_U(pic_width_in_mbs_minus_1);
+    ATTR_U(pic_height_in_mbs_minus_1);
+    ATTR_U(frame_mbs_only_flag);
 
     if (!frame_mbs_only_flag) {
       if ((ret = read_bit(&mb_adaptive_frame_field_flag,
                           &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
         goto free;
 
-      attr("mb_adaptive_frame_field_flag:");
-      printf("%u\n", mb_adaptive_frame_field_flag);
+      ATTR_U(mb_adaptive_frame_field_flag);
     }
 
     if ((ret = read_bit(&direct_8x8_inference_flag,
@@ -1465,10 +1514,8 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
       goto free;
 
-    attr("direct_8x8_inference_flag:");
-    printf("%u\n", direct_8x8_inference_flag);
-    attr("frame_cropping_flag:");
-    printf("%u\n", frame_cropping_flag);
+    ATTR_U(direct_8x8_inference_flag);
+    ATTR_U(frame_cropping_flag);
 
     if (frame_cropping_flag) {
       if ((ret = read_code(&frame_crop_left_offset,
@@ -1481,20 +1528,16 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
                            &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
         goto free;
 
-      attr("frame_crop_left_offset:");
-      printf("%u\n", frame_crop_left_offset);
-      attr("frame_crop_right_offset:");
-      printf("%u\n", frame_crop_right_offset);
-      attr("frame_crop_top_offset:");
-      printf("%u\n", frame_crop_top_offset);
-      attr("frame_crop_bottom_offset:");
-      printf("%u\n", frame_crop_bottom_offset);
+      ATTR_U(frame_crop_left_offset);
+      ATTR_U(frame_crop_right_offset);
+      ATTR_U(frame_crop_top_offset);
+      ATTR_U(frame_crop_bottom_offset);
     }
 
     if ((ret = read_bit(&vui_para_present_flag,
                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
       goto free;
-    attr("vui_para_present_flag:"); printf("%u\n", vui_para_present_flag);
+    ATTR_U(vui_para_present_flag);
 
     if (vui_para_present_flag) {
       indent(1);
@@ -1538,16 +1581,11 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
                          &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
       goto free;
 
-    attr("pic_para_set_id:");
-    printf("%u\n", pic_para_set_id);
-    attr("seq_para_set_id:");
-    printf("%u\n", seq_para_set_id);
-    attr("entropy_coding_mode_flag:");
-    printf("%u\n", entropy_coding_mode_flag);
-    attr("pic_order_present_flag:");
-    printf("%u\n", pic_order_present_flag);
-    attr("num_slice_groups_minus1:");
-    printf("%u\n", num_slice_groups_minus1);
+    ATTR_U(pic_para_set_id);
+    ATTR_U(seq_para_set_id);
+    ATTR_U(entropy_coding_mode_flag);
+    ATTR_U(pic_order_present_flag);
+    ATTR_U(num_slice_groups_minus1);
 
     if (num_slice_groups_minus1 > 0) {
       ret = ERR_UNK_NUM_SLICE_GROUPS_MINUS1;
@@ -1576,26 +1614,16 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
       goto free;
 
-    attr("num_ref_idx_10_active_minus1:");
-    printf("%u\n", num_ref_idx_10_active_minus1);
-    attr("num_ref_idx_11_active_minus1:");
-    printf("%u\n", num_ref_idx_11_active_minus1);
-    attr("weighted_pred_flag:");
-    printf("%u\n", weighted_pred_flag);
-    attr("weighted_bipred_idc:");
-    printf("%u\n", weighted_bipred_idc);
-    attr("pic_init_qp_minus26:");
-    printf("%u\n", pic_init_qp_minus26);
-    attr("pic_init_qs_minus26:");
-    printf("%u\n", pic_init_qs_minus26);
-    attr("chroma_qp_index_offset:");
-    printf("%u\n", chroma_qp_index_offset);
-    attr("deblocking_filter_control_present_flag:");
-    printf("%u\n", deblocking_filter_control_present_flag);
-    attr("constrained_intra_pred_flag:");
-    printf("%u\n", constrained_intra_pred_flag);
-    attr("redundant_pic_cnt_present_flag:");
-    printf("%u\n", redundant_pic_cnt_present_flag);
+    ATTR_U(num_ref_idx_10_active_minus1);
+    ATTR_U(num_ref_idx_11_active_minus1);
+    ATTR_U(weighted_pred_flag);
+    ATTR_U(weighted_bipred_idc);
+    ATTR_U(pic_init_qp_minus26);
+    ATTR_U(pic_init_qs_minus26);
+    ATTR_U(chroma_qp_index_offset);
+    ATTR_U(deblocking_filter_control_present_flag);
+    ATTR_U(constrained_intra_pred_flag);
+    ATTR_U(redundant_pic_cnt_present_flag);
   } else {
     ret = ERR_UNK_NAL_UNIT_TYPE;
     goto exit;
@@ -1657,21 +1685,21 @@ read_avcc(FILE * file, struct box_info * info, box_t p_box) {
   len_size_minus_one = (unsigned char) (len_size_minus_one & 0x3);
   num_of_sps = (unsigned char) (num_of_sps & 0x1f);
 
-  attr("conf_version:"); printf("%u\n", conf_version);
-  attr("profile_idc:"); printf("%u\n", profile_idc);
-  attr("constraint_set0_flag:"); printf("%u\n", c_set0_flag);
-  attr("constraint_set1_flag:"); printf("%u\n", c_set1_flag);
-  attr("constraint_set2_flag:"); printf("%u\n", c_set2_flag);
-  attr("level_idc:"); printf("%u\n", level_idc);
-  attr("len_size_minus_one:"); printf("%u\n", len_size_minus_one);
-  attr("num_of_sps:"); printf("%u\n", num_of_sps);
+  ATTR_U(conf_version);
+  ATTR_U(profile_idc);
+  attr_u("constraint_set0_flag", c_set0_flag);
+  attr_u("constraint_set1_flag", c_set1_flag);
+  attr_u("constraint_set2_flag", c_set2_flag);
+  ATTR_U(level_idc);
+  ATTR_U(len_size_minus_one);
+  ATTR_U(num_of_sps);
 
   indent(1);
   for (i = 0; i < num_of_sps; i++) {
     if ((ret = read_u16(&sps_len, file)) != 0)
       goto exit;
 
-    attr("sps_len:"); printf("%u\n", sps_len);
+    ATTR_U(sps_len);
 
     if ((ret = read_nalu(sps_len, file)) != 0)
       goto exit;
@@ -1681,14 +1709,14 @@ read_avcc(FILE * file, struct box_info * info, box_t p_box) {
   if ((ret = read_u8(&num_of_pps, file)) != 0)
     goto exit;
 
-  attr("num_of_pps:"); printf("%u\n", num_of_pps);
+  ATTR_U(num_of_pps);
 
   indent(1);
   for (i = 0; i < num_of_sps; i++) {
     if ((ret = read_u16(&pps_len, file)) != 0)
       goto exit;
 
-    attr("pps_len:"); printf("%u\n", pps_len);
+    ATTR_U(pps_len);
 
     if ((ret = read_nalu(pps_len, file)) != 0)
       goto exit;
@@ -1730,7 +1758,7 @@ read_stsd(FILE * file, struct box_info * info, box_t p_box) {
       (ret = read_u32(&entry_count, file)) != 0)
     goto exit;
 
-  attr("entry_count:"); printf("%u\n", entry_count);
+  ATTR_U(entry_count);
 
   entry.v_entry = NULL;
 
