@@ -15,14 +15,27 @@ enum {
   ERR_READ_BITS,
   ERR_UNK_PIC_ORDER_CNT_TYPE,
   ERR_UNK_OVERSCAN_INFO_PRESENT_FLAG,
-  ERR_UNK_VIDEO_SIGNAL_TYPE_PRESENT_FLAG,
   ERR_UNK_CHROMA_LOC_INFO_PRESENT_FLAG,
   ERR_UNK_ASPECT_RATIO_IDC,
   ERR_UNK_NAL_HRD_PARA_PRESENT_FLAG,
   ERR_UNK_VCL_HRD_PARA_PRESENT_FLAG,
   ERR_UNK_NUM_SLICE_GROUPS_MINUS1,
   ERR_UNK_PROFILE_IDC,
+  ERR_UNK_TAG,
+  ERR_UNK_ES_FLAGS,
+  ERR_UNK_ID,
   ERR_LEN
+};
+
+enum {
+  TAG_ES_DESCR = 0x03,
+  TAG_DECODER_CONFIG_DESCR,
+  TAG_DEC_SPECIFIC_INFO,
+  TAG_SL_CONFIG_DESCR
+};
+
+enum {
+  CODEC_AAC = 1
 };
 
 union box {
@@ -35,6 +48,7 @@ union box {
   struct box_dinf * dinf;
   struct box_stsd * stsd;
   struct box_visual_sample_entry * v_entry;
+  struct box_audio_sample_entry * a_entry;
 };
 
 typedef union box box_t;
@@ -116,6 +130,13 @@ struct box_visual_sample_entry {
   char compressorname[32];
 };
 
+struct box_audio_sample_entry {
+  unsigned short dref_index;
+  unsigned short channelcount;
+  unsigned short samplesize;
+  unsigned int samplerate;
+};
+
 struct box_stsd {
   unsigned int entry_count;
   box_t entry;
@@ -180,13 +201,15 @@ err_to_str(int i) {
     "Unable to read bits",
     "Unknown pic order count type",
     "Unknown overscan_info_present_flag",
-    "Unknown video_signal_type_present_flag",
     "Unknown chroma_loc_info_present_flag",
     "Unknwon aspect_ratio_idc",
     "Unknown nal_hrd_para_present_flag",
     "Unknown vcl_hrd_para_present_flag",
     "Unknown num_slice_groups_minus1",
-    "Unknown profile_idc"
+    "Unknown profile_idc",
+    "Unknown tag",
+    "Unknown ES flags",
+    "Unknown object type indication"
   };
   if (i < 0 || i >= ERR_LEN)
     return NULL;
@@ -994,7 +1017,53 @@ free_visual_sample_entry(struct box_visual_sample_entry * entry) {
   (void) entry;
 }
 
-int
+static int
+read_audio_sample_entry(FILE * file, struct box_audio_sample_entry * entry) {
+  unsigned int box_size;
+  char box_type[4];
+  unsigned short dref_index; /* data reference index */
+  unsigned short channelcount;
+  unsigned short samplesize;
+  unsigned int samplerate;
+  int ret;
+
+  ret = 0;
+
+  if ((ret = read_u32(&box_size, file)) != 0 ||
+      (ret = read_c32(box_type, file)) != 0 ||
+      (ret = skip(file, 6)) != 0 || /* reserved */
+      (ret = read_u16(&dref_index, file)) != 0 ||
+      (ret = skip(file, 4 * 2)) != 0 || /* reserved */
+      (ret = read_u16(&channelcount, file)) != 0 ||
+      (ret = read_u16(&samplesize, file)) != 0 ||
+      (ret = skip(file, 2 + 2)) != 0 || /* pre defined / reserved */
+      (ret = read_u32(&samplerate, file)) != 0)
+    goto exit;
+
+  indent(0); printf("[%.4s %u]\n", box_type, box_size);
+
+  indent(1);
+
+  ATTR_U(dref_index);
+  ATTR_U(channelcount);
+  ATTR_U(samplesize);
+  ATTR_U_16(samplerate);
+
+  entry->dref_index = dref_index;
+  entry->channelcount = channelcount;
+  entry->samplesize = samplesize;
+  entry->samplerate = samplerate;
+exit:
+  indent(-1);
+  return ret;
+}
+
+static void
+free_audio_sample_entry(struct box_audio_sample_entry * entry) {
+  (void) entry;
+}
+
+static int
 read_code(unsigned int * ret,
           unsigned int * ret_bi,
           unsigned int * ret_pos,
@@ -1196,7 +1265,16 @@ read_vui_para(unsigned int * bi,
   unsigned char aspect_ratio_idc;
 
   unsigned char overscan_info_present_flag;
+
   unsigned char video_signal_type_present_flag;
+  unsigned char video_format;
+  unsigned char video_full_range_flag;
+
+  unsigned char colour_description_present_flag;
+  unsigned char colour_primaries;
+  unsigned char transfer_characteristics;
+  unsigned char matrix_coefficients;
+
   unsigned char chroma_loc_info_present_flag;
 
   unsigned char timing_info_present_flag;
@@ -1262,8 +1340,43 @@ read_vui_para(unsigned int * bi,
   ATTR_U(video_signal_type_present_flag);
 
   if (video_signal_type_present_flag) {
-    ret = ERR_UNK_VIDEO_SIGNAL_TYPE_PRESENT_FLAG;
-    goto exit;
+    if ((ret = read_bits(&n, 3, bi, pos, buf, size, bits)) != 0 ||
+        (ret = read_bit(&video_full_range_flag,
+                        bi, pos, buf, size, bits)) != 0 ||
+        (ret = read_bit(&colour_description_present_flag,
+                        bi, pos, buf, size, bits)) != 0)
+      goto exit;
+
+    video_format = n & 0x7;
+
+    indent(1);
+    ATTR_U(video_format);
+    ATTR_U(video_full_range_flag);
+    ATTR_U(colour_description_present_flag);
+
+    if (colour_description_present_flag) {
+      if ((ret = read_bits(&n, 8, bi, pos, buf, size, bits)) != 0)
+        goto exit;
+
+      colour_primaries = n & 0xff;
+
+      if ((ret = read_bits(&n, 8, bi, pos, buf, size, bits)) != 0)
+        goto exit;
+
+      transfer_characteristics = n & 0xff;
+
+      if ((ret = read_bits(&n, 8, bi, pos, buf, size, bits)) != 0)
+        goto exit;
+
+      matrix_coefficients = n & 0xff;
+
+      indent(1);
+      ATTR_U(colour_primaries);
+      ATTR_U(transfer_characteristics);
+      ATTR_U(matrix_coefficients);
+      indent(-1);
+    }
+    indent(-1);
   }
 
   if ((ret = read_bit(&chroma_loc_info_present_flag,
@@ -1735,6 +1848,217 @@ exit:
 }
 
 static int
+read_tag(unsigned char * ret_tag, unsigned int * ret_len, FILE * file) {
+  unsigned char tag;
+  unsigned int len;
+  unsigned char c;
+  int i;
+  int ret;
+
+  if ((ret = read_u8(&tag, file)) != 0)
+    return ret;
+
+  len = 0;
+  for (i = 0; i < 4; i++) {
+    if ((ret = read_u8(&c, file)) != 0)
+      return ret;
+    len <<= 7;
+    len |= c & 0x7f;
+    if ((c & 0x80) == 0)
+      break;
+  }
+  * ret_len = len;
+  * ret_tag = tag;
+  return 0;
+}
+
+static int
+read_id(unsigned char * ret_codec, FILE * file) {
+  struct pair {
+    unsigned char id;
+    unsigned char codec;
+  };
+  struct pair pairs[] = {
+    {0x40, CODEC_AAC} /* Audio ISO/IEC 14496-3 */
+  };
+  unsigned char id;
+  unsigned int i;
+  int ret;
+
+  if ((ret = read_u8(&id, file)) != 0)
+    return ret;
+
+  attr_u("object_type_idc", id);
+
+  for (i = 0; i < sizeof(pairs)/sizeof(pairs[0]); i++)
+    if (pairs[i].id == id) {
+      * ret_codec = pairs[i].codec;
+      return 0;
+    }
+  return ERR_UNK_ID;
+}
+
+static int
+read_esds(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned char tag;
+  unsigned int tag_len;
+
+  unsigned short es_id;
+  unsigned char es_flags;
+
+  unsigned char codec;
+  unsigned char stream_type;
+  unsigned char up_stream;
+  unsigned int buffer_size_db;
+  unsigned int max_bitrate;
+  unsigned int avg_bitrate;
+
+  unsigned char * bits;
+  unsigned int bi;
+  unsigned int pos;
+  unsigned int buf;
+
+  unsigned int audio_object_type;
+  unsigned int sampling_frequency_index;
+  unsigned int sampling_frequency;
+  unsigned int channel_configuration;
+
+  unsigned char predefined;
+
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  ret = 0;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_tag(&tag, &tag_len, file)) != 0)
+    return ret;
+
+  if (tag != TAG_ES_DESCR)
+    return ERR_UNK_TAG;
+
+  indent(0); printf("[ES_Descr %u]\n", tag_len);
+  indent(1);
+
+  if ((ret = read_u16(&es_id, file)) != 0 ||
+      (ret = read_u8(&es_flags, file)) != 0)
+    return ret;
+
+  ATTR_U(es_id);
+  ATTR_U(es_flags);
+
+  if (es_flags)
+    return ERR_UNK_ES_FLAGS;
+
+  if ((ret = read_tag(&tag, &tag_len, file)) != 0)
+    return ret;
+
+  if (tag != TAG_DECODER_CONFIG_DESCR)
+    return ERR_UNK_TAG;
+
+  indent(0); printf("[DecoderConfigDescr %u]\n", tag_len);
+  indent(1);
+
+  if ((ret = read_id(&codec, file)) != 0 ||
+      (ret = read_u32(&buffer_size_db, file)) != 0 ||
+      (ret = read_u32(&max_bitrate, file)) != 0 ||
+      (ret = read_u32(&avg_bitrate, file)) != 0 ||
+      (ret = read_tag(&tag, &tag_len, file)) != 0)
+    return ret;
+
+  stream_type = (unsigned char) (buffer_size_db >> 26);
+  up_stream = (buffer_size_db >> 25) & 0x1;
+  buffer_size_db = buffer_size_db & 0xffffff; 
+
+  ATTR_U(stream_type);
+  ATTR_U(up_stream);
+  ATTR_U(buffer_size_db);
+  ATTR_U(max_bitrate);
+  ATTR_U(avg_bitrate);
+
+  if (tag != TAG_DEC_SPECIFIC_INFO ||
+      tag_len == 0)
+    return ERR_UNK_TAG;
+
+  indent(0); printf("[DecSpecificInfo %u]\n", tag_len);
+  indent(1);
+
+  if (codec == CODEC_AAC) {
+
+    if ((ret = mem_alloc(&bits, tag_len)) != 0)
+      return ret;
+
+    if ((ret = read_ary(bits, tag_len, 1, file)) != 0)
+      goto free;
+
+    bi = 0;
+    pos = 0;
+    buf = bits[bi++];
+
+    if ((ret = read_bits(&audio_object_type, 5,
+                         &bi, &pos, &buf, tag_len, bits)) != 0)
+      goto free;
+
+    if (audio_object_type == 0x1f) {
+      if ((ret = read_bits(&audio_object_type, 6,
+                           &bi, &pos, &buf, tag_len, bits)) != 0)
+        goto free;
+      audio_object_type += 0x20;
+    }
+
+    ATTR_U(audio_object_type);
+
+    if ((ret = read_bits(&sampling_frequency_index, 4,
+                         &bi, &pos, &buf, tag_len, bits)) != 0)
+      goto free;
+
+    ATTR_U(sampling_frequency_index);
+
+    if (sampling_frequency_index == 0xf) {
+      if ((ret = read_bits(&sampling_frequency, 24,
+                           &bi, &pos, &buf, tag_len, bits)) != 0)
+        goto free;
+
+      ATTR_U(sampling_frequency);
+    } else {
+      sampling_frequency = 0;
+    }
+
+    if ((ret = read_bits(&channel_configuration, 4,
+                         &bi, &pos, &buf, tag_len, bits)) != 0)
+      goto free;
+
+    ATTR_U(channel_configuration);
+free:
+    mem_free(bits);
+  }
+
+  indent(-2);
+
+  if ((ret = read_tag(&tag, &tag_len, file)) != 0)
+    return ret;
+
+  if (tag != TAG_SL_CONFIG_DESCR)
+    return ERR_UNK_TAG;
+
+  indent(0); printf("[SLConfigDescr %u]\n", tag_len);
+  indent(1);
+
+  if ((ret = read_u8(&predefined, file)) != 0)
+    return ret;
+
+  ATTR_U(predefined);
+
+  indent(-2);
+
+  return ret;
+}
+
+static int
 read_stsd(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
@@ -1742,12 +2066,12 @@ read_stsd(FILE * file, struct box_info * info, box_t p_box) {
   unsigned int i;
   unsigned int j;
   box_t entry;
-  struct box_visual_sample_entry * v_entry;
   struct box_hdlr * hdlr;
   struct box_stsd * stsd;
   box_t box;
   static struct box_func_pair funcs[] = {
     {"avcC", read_avcc},
+    {"esds", read_esds},
     {NULL, NULL}
   };
   int ret;
@@ -1766,20 +2090,38 @@ read_stsd(FILE * file, struct box_info * info, box_t p_box) {
 
     hdlr = &p_box.mdia->hdlr;
     if (strncmp(hdlr->type, "vide", 4) == 0) {
+      struct box_visual_sample_entry * v;
 
-      if ((ret = mem_alloc(&v_entry, entry_count * sizeof(* v_entry))) != 0)
+      if ((ret = mem_alloc(&v, entry_count * sizeof(* v))) != 0)
         goto exit;
 
       for (i = 0; i < entry_count; i++)
-        if ((ret = read_visual_sample_entry(file, &v_entry[i])) != 0)
-          goto free_entry;
+        if ((ret = read_visual_sample_entry(file, &v[i])) != 0)
+          goto free_v;
 
-      entry.v_entry = v_entry;
-free_entry:
+      entry.v_entry = v;
+free_v:
       if (ret) {
         for (j = 0; j < i; j++)
-          free_visual_sample_entry(&v_entry[j]);
-        mem_free(v_entry);
+          free_visual_sample_entry(&v[j]);
+        mem_free(v);
+      }
+    } else if (strncmp(hdlr->type, "soun", 4) == 0) {
+      struct box_audio_sample_entry * a;
+
+      if ((ret = mem_alloc(&a, entry_count * sizeof(* a))) != 0)
+        goto exit;
+
+      for (i = 0; i < entry_count; i++)
+        if ((ret = read_audio_sample_entry(file, &a[i])) != 0)
+          goto free_a;
+
+      entry.a_entry = a;
+free_a:
+      if (ret) {
+        for (j = 0; j < i; j++)
+          free_audio_sample_entry(&a[j]);
+        mem_free(a);
       }
     } else {
       ret = ERR_UNK_HDLR_TYPE;
@@ -1805,12 +2147,251 @@ exit:
 }
 
 static int
+read_stts(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int entry_count;
+  unsigned int sample_count;
+  unsigned int sample_delta;
+  unsigned int i;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u32(&entry_count, file)) != 0)
+    return ret;
+
+  ATTR_U(entry_count);
+
+  for (i = 0; i < entry_count; i++) {
+    if ((ret = read_u32(&sample_count, file)) != 0 ||
+        (ret = read_u32(&sample_delta, file)) != 0)
+      return ret;
+
+    indent(0); printf("[%u]\n", i);
+
+    indent(1);
+
+    ATTR_U(sample_count);
+    ATTR_U(sample_delta);
+
+    indent(-1);
+  }
+  return 0;
+}
+
+static int
+read_stsc(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int entry_count;
+  unsigned int first_chunk;
+  unsigned int samples_per_chunk;
+  unsigned int sample_description_index;
+  unsigned int i;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u32(&entry_count, file)) != 0)
+    return ret;
+
+  ATTR_U(entry_count);
+
+  for (i = 0; i < entry_count; i++) {
+    if ((ret = read_u32(&first_chunk, file)) != 0 ||
+        (ret = read_u32(&samples_per_chunk, file)) != 0 ||
+        (ret = read_u32(&sample_description_index, file)) != 0)
+      return ret;
+
+
+    if (entry_count <= 8 ||
+        i < 4 || i >= entry_count - 4) {
+      indent(0); printf("[%u]\n", i);
+      indent(1);
+
+      ATTR_U(first_chunk);
+      ATTR_U(samples_per_chunk);
+      ATTR_U(sample_description_index);
+
+      indent(-1);
+    } else if (i == 4) {
+      indent(0); printf("[...]\n");
+    }
+  }
+  return 0;
+
+}
+
+static int
+read_stco(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int entry_count;
+  unsigned int chunk_offset;
+  unsigned int i;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u32(&entry_count, file)) != 0)
+    return ret;
+
+  ATTR_U(entry_count);
+
+  for (i = 0; i < entry_count; i++) {
+    if ((ret = read_u32(&chunk_offset, file)) != 0)
+      return ret;
+
+    if (entry_count <= 10 ||
+        i < 5 || i >= entry_count - 5) {
+      indent(0); printf("[%u] chunk_offset:            "
+                        "%u\n", i, chunk_offset);
+    } else if (i == 5) {
+      indent(0); printf("[...]\n");
+    }
+  }
+  return 0;
+
+}
+
+static int
+read_stsz(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int sample_size;
+  unsigned int sample_count;
+  unsigned int entry_size;
+  unsigned int i;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u32(&sample_size, file)) != 0 ||
+      (ret = read_u32(&sample_count, file)) != 0)
+    return ret;
+
+  ATTR_U(sample_size);
+  ATTR_U(sample_count);
+
+  if (sample_size == 0)
+    for (i = 0; i < sample_count; i++) {
+      if ((ret = read_u32(&entry_size, file)) != 0)
+        return ret;
+
+      if (sample_count <= 10 ||
+          i < 5 || i >= sample_count - 5) {
+        indent(0); printf("[%u] entry_size:            "
+                          "%u\n", i, entry_size);
+      } else if (i == 5) {
+        indent(0); printf("[...]\n");
+      }
+    }
+  return 0;
+}
+
+static int
+read_stss(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int entry_count;
+  unsigned int sample_number;
+  unsigned int i;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u32(&entry_count, file)) != 0)
+    return ret;
+
+  ATTR_U(entry_count);
+
+  for (i = 0; i < entry_count; i++) {
+    if ((ret = read_u32(&sample_number, file)) != 0)
+      return ret;
+
+    if (entry_count <= 10 ||
+        i < 5 || i >= entry_count - 5) {
+      indent(0); printf("[%u] sample_number:            "
+                        "%u\n", i, sample_number);
+    } else if (i == 5) {
+      indent(0); printf("[...]\n");
+    }
+  }
+  return 0;
+}
+
+static int
 read_stbl(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
     {"stsd", read_stsd},
+    {"stts", read_stts},
+    {"stsc", read_stsc},
+    {"stco", read_stco},
+    {"stsz", read_stsz},
+    {"stss", read_stss},
     {NULL, NULL}
   };
   return read_box(file, info, p_box, funcs);
+}
+
+static int
+read_vmhd(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned short graphicsmode;
+  unsigned short opcolor[3];
+  unsigned int i;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u16(&graphicsmode, file)) != 0)
+    return ret;
+
+  ATTR_U(graphicsmode);
+
+  for (i = 0; i < 3; i++)
+    if ((ret = read_u16(&opcolor[i], file)) != 0)
+      return ret;
+
+  attr_u("opcolor[0]", opcolor[0]);
+  attr_u("opcolor[1]", opcolor[1]);
+  attr_u("opcolor[2]", opcolor[2]);
+
+  return 0;
+}
+
+static int
+read_smhd(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  short balance;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_s16(&balance, file)) != 0 ||
+      (ret = skip(file, 2)) != 0) /* reserved */
+    return ret;
+
+  ATTR_S_8(balance);
+
+  return 0;
 }
 
 static int
@@ -1818,6 +2399,8 @@ read_minf(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
     {"dinf", read_dinf},
     {"stbl", read_stbl},
+    {"vmhd", read_vmhd},
+    {"smhd", read_smhd},
     {NULL, NULL}
   };
   return read_box(file, info, p_box, funcs);
@@ -1858,7 +2441,7 @@ read_trak(FILE * file, struct box_info * info, box_t p_box) {
   return read_box(file, info, box, funcs);
 }
 
-int
+static int
 read_moov(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
     {"mvhd", read_mvhd},
@@ -1870,11 +2453,25 @@ read_moov(FILE * file, struct box_info * info, box_t p_box) {
   return read_box(file, info, box, funcs);
 }
 
-int
+static int
+read_mdat(FILE * file, struct box_info * info, box_t p_box) {
+  long pos;
+  int ret;
+
+  (void) p_box;
+
+  if ((ret = get_pos(&pos, file)) != 0)
+    return ret;
+
+  return skip(file, info->size - (unsigned int) (pos - info->pos));
+}
+
+static int
 read_file(FILE * file, struct box_info * info, box_t box) {
   static struct box_func_pair funcs[] = {
     {"ftyp", read_ftyp},
     {"moov", read_moov},
+    {"mdat", read_mdat},
     {NULL, NULL}
   };
   return read_box(file, info, box, funcs);
