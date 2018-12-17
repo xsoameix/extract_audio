@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
 
 enum {
   ERR_MEM = 1,
@@ -24,6 +23,7 @@ enum {
   ERR_UNK_TAG,
   ERR_UNK_ES_FLAGS,
   ERR_UNK_ID,
+  ERR_EMPTY_BITS,
   ERR_LEN
 };
 
@@ -38,6 +38,39 @@ enum {
   CODEC_AAC = 1
 };
 
+#define MKBOX(a, b, c, d) (((a) << 24) | ((b) << 16) | ((c) << 8) | (d))
+
+enum {
+  BOX_TOP  = MKBOX('t', 'o', 'p', ' '),
+  BOX_FTYP = MKBOX('f', 't', 'y', 'p'),
+  BOX_MOOV = MKBOX('m', 'o', 'o', 'v'),
+  BOX_MVHD = MKBOX('m', 'v', 'h', 'd'),
+  BOX_TRAK = MKBOX('t', 'r', 'a', 'k'),
+  BOX_TKHD = MKBOX('t', 'k', 'h', 'd'),
+  BOX_MDIA = MKBOX('m', 'd', 'i', 'a'),
+  BOX_MDHD = MKBOX('m', 'd', 'h', 'd'),
+  BOX_HDLR = MKBOX('h', 'd', 'l', 'r'),
+  BOX_VIDE = MKBOX('v', 'i', 'd', 'e'),
+  BOX_SOUN = MKBOX('s', 'o', 'u', 'n'),
+  BOX_MINF = MKBOX('m', 'i', 'n', 'f'),
+  BOX_DINF = MKBOX('d', 'i', 'n', 'f'),
+  BOX_DREF = MKBOX('d', 'r', 'e', 'f'),
+  BOX_URL  = MKBOX('u', 'r', 'l', ' '),
+  BOX_URN  = MKBOX('u', 'r', 'n', ' '),
+  BOX_STBL = MKBOX('s', 't', 'b', 'l'),
+  BOX_STSD = MKBOX('s', 't', 's', 'd'),
+  BOX_AVCC = MKBOX('a', 'v', 'c', 'C'),
+  BOX_ESDS = MKBOX('e', 's', 'd', 's'),
+  BOX_STTS = MKBOX('s', 't', 't', 's'),
+  BOX_STSC = MKBOX('s', 't', 's', 'c'),
+  BOX_STCO = MKBOX('s', 't', 'c', 'o'),
+  BOX_STSZ = MKBOX('s', 't', 's', 'z'),
+  BOX_STSS = MKBOX('s', 't', 's', 's'),
+  BOX_VMHD = MKBOX('v', 'm', 'h', 'd'),
+  BOX_SMHD = MKBOX('s', 'm', 'h', 'd'),
+  BOX_MDAT = MKBOX('m', 'd', 'a', 't')
+};
+
 union box {
   struct box_top * top;
   struct box_ftyp * ftyp;
@@ -47,8 +80,8 @@ union box {
   struct box_minf * minf;
   struct box_dinf * dinf;
   struct box_stsd * stsd;
-  struct box_visual_sample_entry * v_entry;
-  struct box_audio_sample_entry * a_entry;
+  struct box_vide * vide;
+  struct box_soun * soun;
 };
 
 typedef union box box_t;
@@ -99,12 +132,13 @@ struct box_mdhd {
 };
 
 struct box_hdlr {
-  char type[4];
+  unsigned int type;
   char * name;
 };
 
-struct box_data_entry {
-  char type[3];
+struct box_dref_entry {
+  unsigned int type;
+  char _[3];
   unsigned char self_contained;
   char * name;
   char * location;
@@ -112,14 +146,14 @@ struct box_data_entry {
 
 struct box_dref {
   unsigned int entry_count;
-  struct box_data_entry * entry;
+  struct box_dref_entry * entry;
 };
 
 struct box_dinf {
   struct box_dref dref;
 };
 
-struct box_visual_sample_entry {
+struct box_vide {
   unsigned short dref_index;
   unsigned short width;
   unsigned short height;
@@ -130,7 +164,7 @@ struct box_visual_sample_entry {
   char compressorname[32];
 };
 
-struct box_audio_sample_entry {
+struct box_soun {
   unsigned short dref_index;
   unsigned short channelcount;
   unsigned short samplesize;
@@ -175,16 +209,27 @@ struct box_top {
 
 struct box_info {
   unsigned int size;
-  char type[4];
+  unsigned int type;
   long pos;
 };
 
 typedef int (* box_func)(FILE * file, struct box_info * info, box_t p_box);
 
 struct box_func_pair {
-  const char * name;
+  unsigned int name;
   box_func func;
 };
+
+static const char *
+box_to_str(unsigned int x) {
+  static char s[4];
+
+  s[0] = (char) (x >> 24);
+  s[1] = (char) (x >> 16);
+  s[2] = (char) (x >> 8);
+  s[3] = (char) x;
+  return s;
+}
 
 static const char *
 err_to_str(int i) {
@@ -209,7 +254,8 @@ err_to_str(int i) {
     "Unknown profile_idc",
     "Unknown tag",
     "Unknown ES flags",
-    "Unknown object type indication"
+    "Unknown object type indication",
+    "Empty bits"
   };
   if (i < 0 || i >= ERR_LEN)
     return NULL;
@@ -529,19 +575,18 @@ read_box(FILE * file, struct box_info * info, box_t box,
     if ((unsigned int) (child.pos - info->pos) == info->size)
       return 0;
 
-    if ((ret = read_u32(&child.size, file)) != 0)
-      return ret;
-    if ((ret = read_c32(child.type, file)) != 0)
+    if ((ret = read_u32(&child.size, file)) != 0 ||
+        (ret = read_u32(&child.type, file)) != 0)
       return ret;
 
-    for (i = 0; pairs[i].name != NULL; i++)
-      if (strncmp(pairs[i].name, child.type, 4) == 0)
+    for (i = 0; pairs[i].name; i++)
+      if (pairs[i].name == child.type)
         break;
 
-    indent(0); printf("[%.4s %u]\n", child.type, child.size);
+    indent(0); printf("[%.4s %u]\n", box_to_str(child.type), child.size);
     indent(1);
 
-    if (pairs[i].name == NULL)
+    if (pairs[i].name == 0)
       return ERR_UNK_BOX;
 
     if ((ret = pairs[i].func(file, &child, box)) != 0)
@@ -789,7 +834,7 @@ static int
 read_hdlr(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
-  char type[4]; /* handler type */
+  unsigned int type; /* handler type */
   char * name;
   struct box_hdlr * hdlr;
   int ret;
@@ -798,25 +843,25 @@ read_hdlr(FILE * file, struct box_info * info, box_t p_box) {
 
   if ((ret = read_ver(&version, &flags, file)) != 0 ||
       (ret = skip(file, 4)) != 0 || /* pre defined */
-      (ret = read_c32(type, file)) != 0 ||
+      (ret = read_u32(&type, file)) != 0 ||
       (ret = skip(file, 4 * 3)) != 0 || /* reserved */
       (ret = read_str(&name, file)) != 0)
     return ret;
 
-  attr_c32("handler_type", type);
+  attr_c32("handler_type", box_to_str(type));
   ATTR_STR(name);
 
   hdlr = &p_box.mdia->hdlr;
-  memcpy(hdlr->type, type, sizeof(type));
+  hdlr->type = type;
   hdlr->name = name;
 
   return 0;
 }
 
 static int
-read_data_entry(FILE * file, struct box_data_entry * entry) {
+read_dref_entry(FILE * file, struct box_dref_entry * entry) {
   unsigned int box_size;
-  char box_type[4];
+  unsigned int box_type;
   unsigned char version;
   unsigned int flags;
   unsigned char self_contained;
@@ -827,21 +872,14 @@ read_data_entry(FILE * file, struct box_data_entry * entry) {
   ret = 0;
 
   if ((ret = read_u32(&box_size, file)) != 0 ||
-      (ret = read_c32(box_type, file)) != 0)
+      (ret = read_u32(&box_type, file)) != 0 ||
+      (ret = read_ver(&version, &flags, file)) != 0)
     goto exit;
 
-  indent(0); printf("[%.4s %u]\n", box_type, box_size);
+  indent(0); printf("[%.4s %u]\n", box_to_str(box_type), box_size);
 
   indent(1);
 
-  if (strncmp(box_type, "url ", 4) != 0 &&
-      strncmp(box_type, "urn ", 4) != 0) {
-    ret = ERR_UNK_BOX;
-    goto exit;
-  }
-
-  if ((ret = read_ver(&version, &flags, file)) != 0)
-    goto exit;
   self_contained = flags & 0x1;
 
   ATTR_U(self_contained);
@@ -849,7 +887,7 @@ read_data_entry(FILE * file, struct box_data_entry * entry) {
   name = NULL;
   location = NULL;
 
-  if (strncmp(box_type, "url ", 4) == 0) {
+  if (box_type == BOX_URL) {
 
     if (self_contained == 0) {
 
@@ -858,7 +896,7 @@ read_data_entry(FILE * file, struct box_data_entry * entry) {
 
       ATTR_STR(location);
     }
-  } else { /* urn */
+  } else if (box_type == BOX_URN) {
 
     if ((ret = read_str(&name, file)) != 0)
       goto exit;
@@ -872,8 +910,11 @@ free:
       mem_free(name);
       goto exit;
     }
+  } else {
+    ret = ERR_UNK_BOX;
+    goto exit;
   }
-  memcpy(entry->type, box_type, sizeof(entry->type));
+  entry->type = box_type;
   entry->self_contained = self_contained;
   entry->name = name;
   entry->location = location;
@@ -883,7 +924,7 @@ exit:
 }
 
 static void
-free_data_entry(struct box_data_entry * entry) {
+free_dref_entry(struct box_dref_entry * entry) {
   mem_free(entry->name);
   mem_free(entry->location);
 }
@@ -895,7 +936,7 @@ read_dref(FILE * file, struct box_info * info, box_t p_box) {
   unsigned int entry_count;
   unsigned int i;
   unsigned int j;
-  struct box_data_entry * entry;
+  struct box_dref_entry * entry;
   struct box_dref * dref;
   int ret;
 
@@ -917,13 +958,13 @@ read_dref(FILE * file, struct box_info * info, box_t p_box) {
       goto exit;
 
     for (i = 0; i < entry_count; i++) {
-      if ((ret = read_data_entry(file, &entry[i])) != 0)
+      if ((ret = read_dref_entry(file, &entry[i])) != 0)
         goto free;
     }
 free:
     if (ret) {
       for (j = 0; j < i; j++)
-        free_data_entry(&entry[j]);
+        free_dref_entry(&entry[j]);
       goto exit;
     }
   }
@@ -941,8 +982,8 @@ exit:
 static int
 read_dinf(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
-    {"dref", read_dref},
-    {NULL, NULL}
+    {BOX_DREF, read_dref},
+    {0, NULL}
   };
   box_t box;
   box.dinf = &p_box.mdia->minf.dinf;
@@ -950,9 +991,9 @@ read_dinf(FILE * file, struct box_info * info, box_t p_box) {
 }
 
 static int
-read_visual_sample_entry(FILE * file, struct box_visual_sample_entry * entry) {
+read_vide(FILE * file, struct box_vide * vide) {
   unsigned int box_size;
-  char box_type[4];
+  unsigned int box_type;
   unsigned short dref_index; /* data reference index */
   unsigned short width;
   unsigned short height;
@@ -967,7 +1008,7 @@ read_visual_sample_entry(FILE * file, struct box_visual_sample_entry * entry) {
   ret = 0;
 
   if ((ret = read_u32(&box_size, file)) != 0 ||
-      (ret = read_c32(box_type, file)) != 0 ||
+      (ret = read_u32(&box_type, file)) != 0 ||
       (ret = skip(file, 6)) != 0 || /* reserved */
       (ret = read_u16(&dref_index, file)) != 0 ||
       (ret = skip(file, 2 + 2 + 4 * 3)) != 0 || /* pre / reserved / pre */
@@ -986,7 +1027,7 @@ read_visual_sample_entry(FILE * file, struct box_visual_sample_entry * entry) {
 
   compressorname[len] = '\0';
 
-  indent(0); printf("[%.4s %u]\n", box_type, box_size);
+  indent(0); printf("[%.4s %u]\n", box_to_str(box_type), box_size);
 
   indent(1);
 
@@ -999,28 +1040,28 @@ read_visual_sample_entry(FILE * file, struct box_visual_sample_entry * entry) {
   ATTR_STR(compressorname);
   ATTR_U(depth);
 
-  entry->dref_index = dref_index;
-  entry->width = width;
-  entry->height = height;
-  entry->h_rez = h_rez;
-  entry->v_rez = v_rez;
-  entry->frame_count = frame_count;
-  memcpy(entry->compressorname, compressorname, sizeof(compressorname));
-  entry->depth = depth;
+  vide->dref_index = dref_index;
+  vide->width = width;
+  vide->height = height;
+  vide->h_rez = h_rez;
+  vide->v_rez = v_rez;
+  vide->frame_count = frame_count;
+  memcpy(vide->compressorname, compressorname, sizeof(compressorname));
+  vide->depth = depth;
 exit:
   indent(-1);
   return ret;
 }
 
 static void
-free_visual_sample_entry(struct box_visual_sample_entry * entry) {
-  (void) entry;
+free_vide(struct box_vide * vide) {
+  (void) vide;
 }
 
 static int
-read_audio_sample_entry(FILE * file, struct box_audio_sample_entry * entry) {
+read_soun(FILE * file, struct box_soun * soun) {
   unsigned int box_size;
-  char box_type[4];
+  unsigned int box_type;
   unsigned short dref_index; /* data reference index */
   unsigned short channelcount;
   unsigned short samplesize;
@@ -1030,7 +1071,7 @@ read_audio_sample_entry(FILE * file, struct box_audio_sample_entry * entry) {
   ret = 0;
 
   if ((ret = read_u32(&box_size, file)) != 0 ||
-      (ret = read_c32(box_type, file)) != 0 ||
+      (ret = read_u32(&box_type, file)) != 0 ||
       (ret = skip(file, 6)) != 0 || /* reserved */
       (ret = read_u16(&dref_index, file)) != 0 ||
       (ret = skip(file, 4 * 2)) != 0 || /* reserved */
@@ -1040,7 +1081,7 @@ read_audio_sample_entry(FILE * file, struct box_audio_sample_entry * entry) {
       (ret = read_u32(&samplerate, file)) != 0)
     goto exit;
 
-  indent(0); printf("[%.4s %u]\n", box_type, box_size);
+  indent(0); printf("[%.4s %u]\n", box_to_str(box_type), box_size);
 
   indent(1);
 
@@ -1049,27 +1090,45 @@ read_audio_sample_entry(FILE * file, struct box_audio_sample_entry * entry) {
   ATTR_U(samplesize);
   ATTR_U_16(samplerate);
 
-  entry->dref_index = dref_index;
-  entry->channelcount = channelcount;
-  entry->samplesize = samplesize;
-  entry->samplerate = samplerate;
+  soun->dref_index = dref_index;
+  soun->channelcount = channelcount;
+  soun->samplesize = samplesize;
+  soun->samplerate = samplerate;
 exit:
   indent(-1);
   return ret;
 }
 
 static void
-free_audio_sample_entry(struct box_audio_sample_entry * entry) {
-  (void) entry;
+free_soun(struct box_soun * soun) {
+  (void) soun;
+}
+
+struct bits {
+  unsigned char * bytes;
+  unsigned int size;
+  unsigned int i; /* index of unread bytes */
+  unsigned int pos;
+  unsigned int buf;
+};
+
+static int
+init_bits(struct bits * bits, unsigned char * bytes, unsigned int size) {
+  if (size == 0)
+    return ERR_EMPTY_BITS;
+  bits->size = size;
+  bits->bytes = bytes;
+  bits->buf = bytes[0];
+  bits->i = 1;
+  bits->pos = 0;
+  return 0;
 }
 
 static int
-read_code(unsigned int * ret,
-          unsigned int * ret_bi,
-          unsigned int * ret_pos,
-          unsigned int * ret_buf,
-          unsigned int size, unsigned char * bits) {
-  unsigned int bi; /* byte index */
+read_code(unsigned int * ret, struct bits * bits) {
+  unsigned char * b; /* bytes */
+  unsigned int size; /* size */
+  unsigned int i; /* byte index */
   unsigned int pos; /* bit position */
 
   unsigned int z; /* number of zeros */
@@ -1078,9 +1137,11 @@ read_code(unsigned int * ret,
 
   unsigned int l; /* last n bits */
 
-  bi = * ret_bi;
-  pos = * ret_pos;
-  u = * ret_buf;
+  b    = bits->bytes;
+  size = bits->size;
+  i    = bits->i;
+  pos  = bits->pos;
+  u    = bits->buf;
 
   /* read zeros */
   z = 0;
@@ -1089,10 +1150,10 @@ read_code(unsigned int * ret,
     z += 8 - pos;
     pos = 0;
     for (;;) { /* read next byte to find the first leading '1' */
-      if (bi >= size)
+      if (i >= size)
         return ERR_READ_CODE; /* out of bound */
 
-      u = bits[bi++];
+      u = b[i++];
       if (u)
         break; /* the first leading '1' is found in this byte */
       z += 8;
@@ -1111,7 +1172,7 @@ read_code(unsigned int * ret,
   /* first non-zero bit */
   pos++;
 
-  if (bi + ((pos + z - 1) >> 3) > size)
+  if (i + ((pos + z - 1) >> 3) > size)
     return ERR_READ_CODE; /* out of bound */
 
   /* last n bit */
@@ -1119,12 +1180,12 @@ read_code(unsigned int * ret,
     l = u & ((unsigned int) 0xff >> pos);
     pos = z - (8 - pos);
     for (; pos > 8; pos -= 8) {
-      u = bits[bi++];
+      u = b[i++];
       l <<= 8;
       l |= u;
     }
     if (pos) {
-      u = bits[bi++];
+      u = b[i++];
       l <<= pos;
       l |= u >> (8 - pos);
     }
@@ -1141,78 +1202,93 @@ read_code(unsigned int * ret,
   else
     l += ~(0xffffffff << z);
 
-  * ret_buf = u;
-  * ret_pos = pos;
-  * ret_bi = bi;
+  bits->buf = u;
+  bits->pos = pos;
+  bits->i = i;
   * ret = l;
 
   return 0;
 }
 
 static int
-read_bit(unsigned char * ret,
-         unsigned int * ret_bi,
-         unsigned int * ret_pos,
-         unsigned int * ret_buf,
-         unsigned int size, unsigned char * bits) {
-  unsigned int bi;
+read_code_8(unsigned char * c, struct bits * bits) {
+  unsigned int n;
+  int ret;
+
+  if ((ret = read_code(&n, bits)) != 0)
+    return ret;
+
+  if (n >> 8)
+    return ERR_READ_CODE;
+
+  * c = n & 0xff;
+  return 0;
+}
+
+static int
+read_bit(unsigned char * ret, struct bits * bits) {
+  unsigned char * b;
+  unsigned int size;
+  unsigned int i;
   unsigned int pos;
   unsigned int buf;
   unsigned char bit;
 
-  bi = * ret_bi;
-  pos = * ret_pos;
-  buf = * ret_buf;
+  b    = bits->bytes;
+  size = bits->size;
+  i    = bits->i;
+  pos  = bits->pos;
+  buf  = bits->buf;
 
   if (pos == 8) {
-    if (bi >= size)
+    if (i >= size)
       return ERR_READ_BIT;
 
-    buf = bits[bi++];
+    buf = b[i++];
     pos = 0;
   }
 
   bit = (buf & ((unsigned int) 0x80 >> pos)) != 0;
 
-  * ret_bi = bi;
-  * ret_pos = pos + 1;
-  * ret_buf = buf;
+  bits->i = i;
+  bits->pos = pos + 1;
+  bits->buf = buf;
   * ret = bit;
 
   return 0;
 }
 
 static int
-read_bits(unsigned int * ret,
-          unsigned char w, /* width */
-          unsigned int * ret_bi,
-          unsigned int * ret_pos,
-          unsigned int * ret_buf,
-          unsigned int size, unsigned char * bits) {
-  unsigned int bi;
+read_bits(unsigned int * ret, unsigned char w, /* width */
+          struct bits * bits) {
+  unsigned char * b;
+  unsigned int size;
+  unsigned int i;
   unsigned int pos;
   unsigned int u; /* unsigned byte */
   unsigned int r; /* result */
 
-  bi = * ret_bi;
-  pos = * ret_pos;
-  u = * ret_buf;
+  b    = bits->bytes;
+  size = bits->size;
+  i    = bits->i;
+  pos  = bits->pos;
+  u    = bits->buf;
 
   /* width valid range: 1~32 */
 
-  if (bi + ((pos + w - 1) >> 3) > size)
+  if (i + ((pos + w - 1) >> 3) > size)
     return ERR_READ_BITS; /* out of bound */
 
   if (w > 8 - pos) {
     r = u & ((unsigned int) 0xff >> pos);
     pos = w - (8 - pos);
     for (; pos > 8; pos -= 8) {
-      u = bits[bi++];
+      u = b[i++];
       r <<= 8;
       r |= u;
     }
     if (pos) {
-      u = bits[bi++];
+      u = b[i++];
       r <<= pos;
       r |= u >> (8 - pos);
     }
@@ -1221,11 +1297,24 @@ read_bits(unsigned int * ret,
     pos += w;
   }
 
-  * ret_bi = bi;
-  * ret_pos = pos;
-  * ret_buf = u;
+  bits->i = i;
+  bits->pos = pos;
+  bits->buf = u;
   * ret = r;
 
+  return 0;
+}
+
+static int
+read_bits_8(unsigned char * c, unsigned char w, /* width <= 8 */
+            struct bits * bits) {
+  unsigned int n;
+  int ret;
+
+  if ((ret = read_bits(&n, w, bits)) != 0)
+    return ret;
+
+  * c = n & 0xff;
   return 0;
 }
 
@@ -1257,10 +1346,7 @@ exit:
 #endif
 
 static int
-read_vui_para(unsigned int * bi,
-              unsigned int * pos,
-              unsigned int * buf,
-              unsigned int size, unsigned char * bits) {
+read_vui_para(struct bits * bits) {
   unsigned char aspect_ratio_info_present_flag;
   unsigned char aspect_ratio_idc;
 
@@ -1295,22 +1381,18 @@ read_vui_para(unsigned int * bi,
   unsigned int num_reorder_frames;
   unsigned int max_dec_frame_buffering;
 
-  unsigned int n;
   int ret;
 
   ret = 0;
 
-  if ((ret = read_bit(&aspect_ratio_info_present_flag,
-                      bi, pos, buf, size, bits)) != 0)
+  if ((ret = read_bit(&aspect_ratio_info_present_flag, bits)) != 0)
     goto exit;
 
   ATTR_U(aspect_ratio_info_present_flag);
 
   if (aspect_ratio_info_present_flag) {
-    if ((ret = read_bits(&n, 8, bi, pos, buf, size, bits)) != 0)
+    if ((ret = read_bits_8(&aspect_ratio_idc, 8, bits)) != 0)
       goto exit;
-
-    aspect_ratio_idc = n & 0xff;
 
     indent(1);
     ATTR_U(aspect_ratio_idc);
@@ -1322,8 +1404,7 @@ read_vui_para(unsigned int * bi,
     }
   }
 
-  if ((ret = read_bit(&overscan_info_present_flag,
-                      bi, pos, buf, size, bits)) != 0)
+  if ((ret = read_bit(&overscan_info_present_flag, bits)) != 0)
     goto exit;
 
   ATTR_U(overscan_info_present_flag);
@@ -1333,21 +1414,16 @@ read_vui_para(unsigned int * bi,
     goto exit;
   }
 
-  if ((ret = read_bit(&video_signal_type_present_flag,
-                      bi, pos, buf, size, bits)) != 0)
+  if ((ret = read_bit(&video_signal_type_present_flag, bits)) != 0)
     goto exit;
 
   ATTR_U(video_signal_type_present_flag);
 
   if (video_signal_type_present_flag) {
-    if ((ret = read_bits(&n, 3, bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_bit(&video_full_range_flag,
-                        bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_bit(&colour_description_present_flag,
-                        bi, pos, buf, size, bits)) != 0)
+    if ((ret = read_bits_8(&video_format, 3, bits)) != 0 ||
+        (ret = read_bit(&video_full_range_flag, bits)) != 0 ||
+        (ret = read_bit(&colour_description_present_flag, bits)) != 0)
       goto exit;
-
-    video_format = n & 0x7;
 
     indent(1);
     ATTR_U(video_format);
@@ -1355,20 +1431,10 @@ read_vui_para(unsigned int * bi,
     ATTR_U(colour_description_present_flag);
 
     if (colour_description_present_flag) {
-      if ((ret = read_bits(&n, 8, bi, pos, buf, size, bits)) != 0)
+      if ((ret = read_bits_8(&colour_primaries, 8, bits)) != 0 ||
+          (ret = read_bits_8(&transfer_characteristics, 8, bits)) != 0 ||
+          (ret = read_bits_8(&matrix_coefficients, 8, bits)) != 0)
         goto exit;
-
-      colour_primaries = n & 0xff;
-
-      if ((ret = read_bits(&n, 8, bi, pos, buf, size, bits)) != 0)
-        goto exit;
-
-      transfer_characteristics = n & 0xff;
-
-      if ((ret = read_bits(&n, 8, bi, pos, buf, size, bits)) != 0)
-        goto exit;
-
-      matrix_coefficients = n & 0xff;
 
       indent(1);
       ATTR_U(colour_primaries);
@@ -1379,8 +1445,7 @@ read_vui_para(unsigned int * bi,
     indent(-1);
   }
 
-  if ((ret = read_bit(&chroma_loc_info_present_flag,
-                      bi, pos, buf, size, bits)) != 0)
+  if ((ret = read_bit(&chroma_loc_info_present_flag, bits)) != 0)
     goto exit;
 
   ATTR_U(chroma_loc_info_present_flag);
@@ -1390,19 +1455,15 @@ read_vui_para(unsigned int * bi,
     goto exit;
   }
 
-  if ((ret = read_bit(&timing_info_present_flag,
-                      bi, pos, buf, size, bits)) != 0)
+  if ((ret = read_bit(&timing_info_present_flag, bits)) != 0)
     goto exit;
 
   ATTR_U(timing_info_present_flag);
 
   if (timing_info_present_flag) {
-    if ((ret = read_bits(&num_units_in_tick, 32,
-                         bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_bits(&time_scale, 32,
-                         bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_bit(&fixed_frame_rate_flag,
-                        bi, pos, buf, size, bits)) != 0)
+    if ((ret = read_bits(&num_units_in_tick, 32, bits)) != 0 ||
+        (ret = read_bits(&time_scale, 32, bits)) != 0 ||
+        (ret = read_bit(&fixed_frame_rate_flag, bits)) != 0)
       goto exit;
 
     indent(1);
@@ -1412,8 +1473,7 @@ read_vui_para(unsigned int * bi,
     indent(-1);
   }
 
-  if ((ret = read_bit(&nal_hrd_para_present_flag,
-                      bi, pos, buf, size, bits)) != 0)
+  if ((ret = read_bit(&nal_hrd_para_present_flag, bits)) != 0)
     goto exit;
 
   ATTR_U(nal_hrd_para_present_flag);
@@ -1423,8 +1483,7 @@ read_vui_para(unsigned int * bi,
     goto exit;
   }
 
-  if ((ret = read_bit(&vcl_hrd_para_present_flag,
-                      bi, pos, buf, size, bits)) != 0)
+  if ((ret = read_bit(&vcl_hrd_para_present_flag, bits)) != 0)
     goto exit;
 
   ATTR_U(vcl_hrd_para_present_flag);
@@ -1439,33 +1498,21 @@ read_vui_para(unsigned int * bi,
     goto exit;
   }
 
-  if ((ret = read_bit(&pic_struct_present_flag,
-                      bi, pos, buf, size, bits)) != 0)
+  if ((ret = read_bit(&pic_struct_present_flag, bits)) != 0 ||
+      (ret = read_bit(&bitstream_restriction_flag, bits)) != 0)
     goto exit;
 
   ATTR_U(pic_struct_present_flag);
-
-  if ((ret = read_bit(&bitstream_restriction_flag,
-                      bi, pos, buf, size, bits)) != 0)
-    goto exit;
-
   ATTR_U(bitstream_restriction_flag);
 
   if (bitstream_restriction_flag) {
-    if ((ret = read_bit(&motion_vectors_over_pic_boundaries_flag,
-                        bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_code(&max_bytes_per_pic_denom,
-                         bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_code(&max_bits_per_mb_denom,
-                         bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_code(&log2_max_mv_length_horizontal,
-                         bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_code(&log2_max_mv_length_vertical,
-                         bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_code(&num_reorder_frames,
-                         bi, pos, buf, size, bits)) != 0 ||
-        (ret = read_code(&max_dec_frame_buffering,
-                         bi, pos, buf, size, bits)) != 0)
+    if ((ret = read_bit(&motion_vectors_over_pic_boundaries_flag, bits)) != 0 ||
+        (ret = read_code(&max_bytes_per_pic_denom, bits)) != 0 ||
+        (ret = read_code(&max_bits_per_mb_denom, bits)) != 0 ||
+        (ret = read_code(&log2_max_mv_length_horizontal, bits)) != 0 ||
+        (ret = read_code(&log2_max_mv_length_vertical, bits)) != 0 ||
+        (ret = read_code(&num_reorder_frames, bits)) != 0 ||
+        (ret = read_code(&max_dec_frame_buffering, bits)) != 0)
       goto exit;
 
     indent(1);
@@ -1489,10 +1536,7 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
   unsigned int rbsp_size;
   unsigned char * nalu;
   unsigned char * rbsp;
-  unsigned int bi;
-  unsigned int pos;
-  unsigned int buf;
-  unsigned int n;
+  struct bits bits;
   unsigned int i;
   int ret;
 
@@ -1546,14 +1590,14 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
     unsigned int frame_crop_bottom_offset;
     unsigned char vui_para_present_flag;
 
-    bi = 0;
-
-    if (bi + 3 > rbsp_size)
+    if ((ret = init_bits(&bits, rbsp, rbsp_size)) != 0 ||
+        (ret = read_bits_8(&profile_idc, 8, &bits)) != 0 ||
+        (ret = read_bits_8(&profile_comp, 8, &bits)) != 0 ||
+        (ret = read_bits_8(&level_idc, 8, &bits)) != 0 ||
+        (ret = read_code_8(&seq_para_set_id, &bits)) != 0 ||
+        (ret = read_code_8(&log2_max_frame_num_minus4, &bits)) != 0 ||
+        (ret = read_code_8(&pic_order_cnt_type, &bits)) != 0)
       goto free;
-
-    profile_idc = rbsp[bi++];
-    profile_comp = rbsp[bi++];
-    level_idc = rbsp[bi++];
 
     c_set0_flag = (unsigned char) ((profile_comp >> 7) & 0x1);
     c_set1_flag = (unsigned char) ((profile_comp >> 6) & 0x1);
@@ -1564,27 +1608,6 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
     attr_u("constraint_set1_flag", c_set1_flag);
     attr_u("constraint_set2_flag", c_set2_flag);
     ATTR_U(level_idc);
-
-    if (bi + 1 > rbsp_size)
-      goto free;
-
-    pos = 0;
-    buf = rbsp[bi++];
-    if ((ret = read_code(&n, &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
-      goto free;
-
-    seq_para_set_id = n & 0x1f;
-
-    if ((ret = read_code(&n, &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
-      goto free;
-
-    log2_max_frame_num_minus4 = n & 0xf;
-
-    if ((ret = read_code(&n, &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
-      goto free;
-
-    pic_order_cnt_type = n & 0x3;
-
     ATTR_U(seq_para_set_id);
     ATTR_U(log2_max_frame_num_minus4);
     ATTR_U(pic_order_cnt_type);
@@ -1595,16 +1618,11 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
       goto free;
     }
 
-    if ((ret = read_code(&num_ref_frames,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bit(&gaps_in_frame_num_value_allowed_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_code(&pic_width_in_mbs_minus_1,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_code(&pic_height_in_mbs_minus_1,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bit(&frame_mbs_only_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
+    if ((ret = read_code(&num_ref_frames, &bits)) != 0 ||
+        (ret = read_bit(&gaps_in_frame_num_value_allowed_flag, &bits)) != 0 ||
+        (ret = read_code(&pic_width_in_mbs_minus_1, &bits)) != 0 ||
+        (ret = read_code(&pic_height_in_mbs_minus_1, &bits)) != 0 ||
+        (ret = read_bit(&frame_mbs_only_flag, &bits)) != 0)
       goto free;
 
     ATTR_U(num_ref_frames);
@@ -1614,31 +1632,24 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
     ATTR_U(frame_mbs_only_flag);
 
     if (!frame_mbs_only_flag) {
-      if ((ret = read_bit(&mb_adaptive_frame_field_flag,
-                          &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
+      if ((ret = read_bit(&mb_adaptive_frame_field_flag, &bits)) != 0)
         goto free;
 
       ATTR_U(mb_adaptive_frame_field_flag);
     }
 
-    if ((ret = read_bit(&direct_8x8_inference_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bit(&frame_cropping_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
+    if ((ret = read_bit(&direct_8x8_inference_flag, &bits)) != 0 ||
+        (ret = read_bit(&frame_cropping_flag, &bits)) != 0)
       goto free;
 
     ATTR_U(direct_8x8_inference_flag);
     ATTR_U(frame_cropping_flag);
 
     if (frame_cropping_flag) {
-      if ((ret = read_code(&frame_crop_left_offset,
-                           &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-          (ret = read_code(&frame_crop_right_offset,
-                           &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-          (ret = read_code(&frame_crop_top_offset,
-                           &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-          (ret = read_code(&frame_crop_bottom_offset,
-                           &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
+      if ((ret = read_code(&frame_crop_left_offset, &bits)) != 0 ||
+          (ret = read_code(&frame_crop_right_offset, &bits)) != 0 ||
+          (ret = read_code(&frame_crop_top_offset, &bits)) != 0 ||
+          (ret = read_code(&frame_crop_bottom_offset, &bits)) != 0)
         goto free;
 
       ATTR_U(frame_crop_left_offset);
@@ -1647,14 +1658,13 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
       ATTR_U(frame_crop_bottom_offset);
     }
 
-    if ((ret = read_bit(&vui_para_present_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
+    if ((ret = read_bit(&vui_para_present_flag, &bits)) != 0)
       goto free;
     ATTR_U(vui_para_present_flag);
 
     if (vui_para_present_flag) {
       indent(1);
-      if ((ret = read_vui_para(&bi, &pos, &buf, rbsp_size, rbsp)) != 0)
+      if ((ret = read_vui_para(&bits)) != 0)
         goto free;
       indent(-1);
     }
@@ -1675,23 +1685,12 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
     unsigned char constrained_intra_pred_flag;
     unsigned char redundant_pic_cnt_present_flag;
 
-    if (rbsp_size < 1)
-      goto free;
-
-    bi = 0;
-    pos = 0;
-    buf = rbsp[bi++];
-
-    if ((ret = read_code(&pic_para_set_id,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_code(&seq_para_set_id,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bit(&entropy_coding_mode_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bit(&pic_order_present_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_code(&num_slice_groups_minus1,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
+    if ((ret = init_bits(&bits, rbsp, rbsp_size)) != 0 ||
+        (ret = read_code(&pic_para_set_id, &bits)) != 0 ||
+        (ret = read_code(&seq_para_set_id, &bits)) != 0 ||
+        (ret = read_bit(&entropy_coding_mode_flag, &bits)) != 0 ||
+        (ret = read_bit(&pic_order_present_flag, &bits)) != 0 ||
+        (ret = read_code(&num_slice_groups_minus1, &bits)) != 0)
       goto free;
 
     ATTR_U(pic_para_set_id);
@@ -1705,26 +1704,16 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
       goto free;
     }
 
-    if ((ret = read_code(&num_ref_idx_10_active_minus1,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_code(&num_ref_idx_11_active_minus1,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bit(&weighted_pred_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bits(&weighted_bipred_idc, 2,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_code(&pic_init_qp_minus26,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_code(&pic_init_qs_minus26,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_code(&chroma_qp_index_offset,
-                         &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bit(&deblocking_filter_control_present_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bit(&constrained_intra_pred_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0 ||
-        (ret = read_bit(&redundant_pic_cnt_present_flag,
-                        &bi, &pos, &buf, rbsp_size, rbsp)) != 0)
+    if ((ret = read_code(&num_ref_idx_10_active_minus1, &bits)) != 0 ||
+        (ret = read_code(&num_ref_idx_11_active_minus1, &bits)) != 0 ||
+        (ret = read_bit(&weighted_pred_flag, &bits)) != 0 ||
+        (ret = read_bits(&weighted_bipred_idc, 2, &bits)) != 0 ||
+        (ret = read_code(&pic_init_qp_minus26, &bits)) != 0 ||
+        (ret = read_code(&pic_init_qs_minus26, &bits)) != 0 ||
+        (ret = read_code(&chroma_qp_index_offset, &bits)) != 0 ||
+        (ret = read_bit(&deblocking_filter_control_present_flag, &bits)) != 0 ||
+        (ret = read_bit(&constrained_intra_pred_flag, &bits)) != 0 ||
+        (ret = read_bit(&redundant_pic_cnt_present_flag, &bits)) != 0)
       goto free;
 
     ATTR_U(num_ref_idx_10_active_minus1);
@@ -1915,10 +1904,8 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
   unsigned int max_bitrate;
   unsigned int avg_bitrate;
 
-  unsigned char * bits;
-  unsigned int bi;
-  unsigned int pos;
-  unsigned int buf;
+  unsigned char * bytes;
+  struct bits bits;
 
   unsigned int audio_object_type;
   unsigned int sampling_frequency_index;
@@ -1989,38 +1976,29 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
 
   if (codec == CODEC_AAC) {
 
-    if ((ret = mem_alloc(&bits, tag_len)) != 0)
+    if ((ret = mem_alloc(&bytes, tag_len)) != 0)
       return ret;
 
-    if ((ret = read_ary(bits, tag_len, 1, file)) != 0)
-      goto free;
-
-    bi = 0;
-    pos = 0;
-    buf = bits[bi++];
-
-    if ((ret = read_bits(&audio_object_type, 5,
-                         &bi, &pos, &buf, tag_len, bits)) != 0)
+    if ((ret = read_ary(bytes, tag_len, 1, file)) != 0 ||
+        (ret = init_bits(&bits, bytes, tag_len)) != 0 ||
+        (ret = read_bits(&audio_object_type, 5, &bits)) != 0)
       goto free;
 
     if (audio_object_type == 0x1f) {
-      if ((ret = read_bits(&audio_object_type, 6,
-                           &bi, &pos, &buf, tag_len, bits)) != 0)
+      if ((ret = read_bits(&audio_object_type, 6, &bits)) != 0)
         goto free;
       audio_object_type += 0x20;
     }
 
     ATTR_U(audio_object_type);
 
-    if ((ret = read_bits(&sampling_frequency_index, 4,
-                         &bi, &pos, &buf, tag_len, bits)) != 0)
+    if ((ret = read_bits(&sampling_frequency_index, 4, &bits)) != 0)
       goto free;
 
     ATTR_U(sampling_frequency_index);
 
     if (sampling_frequency_index == 0xf) {
-      if ((ret = read_bits(&sampling_frequency, 24,
-                           &bi, &pos, &buf, tag_len, bits)) != 0)
+      if ((ret = read_bits(&sampling_frequency, 24, &bits)) != 0)
         goto free;
 
       ATTR_U(sampling_frequency);
@@ -2028,13 +2006,12 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
       sampling_frequency = 0;
     }
 
-    if ((ret = read_bits(&channel_configuration, 4,
-                         &bi, &pos, &buf, tag_len, bits)) != 0)
+    if ((ret = read_bits(&channel_configuration, 4, &bits)) != 0)
       goto free;
 
     ATTR_U(channel_configuration);
 free:
-    mem_free(bits);
+    mem_free(bytes);
   }
 
   indent(-2);
@@ -2070,9 +2047,9 @@ read_stsd(FILE * file, struct box_info * info, box_t p_box) {
   struct box_stsd * stsd;
   box_t box;
   static struct box_func_pair funcs[] = {
-    {"avcC", read_avcc},
-    {"esds", read_esds},
-    {NULL, NULL}
+    {BOX_AVCC, read_avcc},
+    {BOX_ESDS, read_esds},
+    {0, NULL}
   };
   int ret;
 
@@ -2084,44 +2061,44 @@ read_stsd(FILE * file, struct box_info * info, box_t p_box) {
 
   ATTR_U(entry_count);
 
-  entry.v_entry = NULL;
+  entry.vide = NULL;
 
   if (entry_count) {
 
     hdlr = &p_box.mdia->hdlr;
-    if (strncmp(hdlr->type, "vide", 4) == 0) {
-      struct box_visual_sample_entry * v;
+    if (hdlr->type == BOX_VIDE) {
+      struct box_vide * v;
 
       if ((ret = mem_alloc(&v, entry_count * sizeof(* v))) != 0)
         goto exit;
 
       for (i = 0; i < entry_count; i++)
-        if ((ret = read_visual_sample_entry(file, &v[i])) != 0)
-          goto free_v;
+        if ((ret = read_vide(file, &v[i])) != 0)
+          goto free_vide;
 
-      entry.v_entry = v;
-free_v:
+      entry.vide = v;
+free_vide:
       if (ret) {
         for (j = 0; j < i; j++)
-          free_visual_sample_entry(&v[j]);
+          free_vide(&v[j]);
         mem_free(v);
       }
-    } else if (strncmp(hdlr->type, "soun", 4) == 0) {
-      struct box_audio_sample_entry * a;
+    } else if (hdlr->type == BOX_SOUN) {
+      struct box_soun * s;
 
-      if ((ret = mem_alloc(&a, entry_count * sizeof(* a))) != 0)
+      if ((ret = mem_alloc(&s, entry_count * sizeof(* s))) != 0)
         goto exit;
 
       for (i = 0; i < entry_count; i++)
-        if ((ret = read_audio_sample_entry(file, &a[i])) != 0)
-          goto free_a;
+        if ((ret = read_soun(file, &s[i])) != 0)
+          goto free_soun;
 
-      entry.a_entry = a;
-free_a:
+      entry.soun = s;
+free_soun:
       if (ret) {
         for (j = 0; j < i; j++)
-          free_audio_sample_entry(&a[j]);
-        mem_free(a);
+          free_soun(&s[j]);
+        mem_free(s);
       }
     } else {
       ret = ERR_UNK_HDLR_TYPE;
@@ -2138,9 +2115,15 @@ free_a:
   stsd->entry = entry;
 free:
   if (ret) {
-    for (j = 0; j < entry_count; j++)
-      free_visual_sample_entry(&entry.v_entry[j]);
-    mem_free(entry.v_entry);
+    if (hdlr->type == BOX_VIDE) {
+      for (i = 0; i < entry_count; i++)
+        free_vide(&entry.vide[i]);
+      mem_free(entry.vide);
+    } else if (hdlr->type == BOX_SOUN) {
+      for (i = 0; i < entry_count; i++)
+        free_soun(&entry.soun[i]);
+      mem_free(entry.soun);
+    }
   }
 exit:
   return ret;
@@ -2334,13 +2317,13 @@ read_stss(FILE * file, struct box_info * info, box_t p_box) {
 static int
 read_stbl(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
-    {"stsd", read_stsd},
-    {"stts", read_stts},
-    {"stsc", read_stsc},
-    {"stco", read_stco},
-    {"stsz", read_stsz},
-    {"stss", read_stss},
-    {NULL, NULL}
+    {BOX_STSD, read_stsd},
+    {BOX_STTS, read_stts},
+    {BOX_STSC, read_stsc},
+    {BOX_STCO, read_stco},
+    {BOX_STSZ, read_stsz},
+    {BOX_STSS, read_stss},
+    {0, NULL}
   };
   return read_box(file, info, p_box, funcs);
 }
@@ -2397,11 +2380,11 @@ read_smhd(FILE * file, struct box_info * info, box_t p_box) {
 static int
 read_minf(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
-    {"dinf", read_dinf},
-    {"stbl", read_stbl},
-    {"vmhd", read_vmhd},
-    {"smhd", read_smhd},
-    {NULL, NULL}
+    {BOX_DINF, read_dinf},
+    {BOX_STBL, read_stbl},
+    {BOX_VMHD, read_vmhd},
+    {BOX_SMHD, read_smhd},
+    {0, NULL}
   };
   return read_box(file, info, p_box, funcs);
 }
@@ -2409,22 +2392,41 @@ read_minf(FILE * file, struct box_info * info, box_t p_box) {
 static int
 read_mdia(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
-    {"mdhd", read_mdhd},
-    {"hdlr", read_hdlr},
-    {"minf", read_minf},
-    {NULL, NULL}
+    {BOX_MDHD, read_mdhd},
+    {BOX_HDLR, read_hdlr},
+    {BOX_MINF, read_minf},
+    {0, NULL}
   };
   box_t box;
   box.mdia = &p_box.trak->mdia;
   return read_box(file, info, box, funcs);
 }
 
+static void
+free_mdia(struct box_mdia * mdia) {
+  unsigned int i;
+
+  if (mdia->hdlr.type == BOX_VIDE) {
+    for (i = 0; i < mdia->minf.stbl.stsd.entry_count; i++)
+      free_vide(&mdia->minf.stbl.stsd.entry.vide[i]);
+    mem_free(mdia->minf.stbl.stsd.entry.vide);
+  } else if (mdia->hdlr.type == BOX_SOUN) {
+    for (i = 0; i < mdia->minf.stbl.stsd.entry_count; i++)
+      free_soun(&mdia->minf.stbl.stsd.entry.soun[i]);
+    mem_free(mdia->minf.stbl.stsd.entry.soun);
+  }
+  for (i = 0; i < mdia->minf.dinf.dref.entry_count; i++)
+    free_dref_entry(&mdia->minf.dinf.dref.entry[i]);
+  mem_free(mdia->minf.dinf.dref.entry);
+  mem_free(mdia->hdlr.name);
+}
+
 static int
 read_trak(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
-    {"tkhd", read_tkhd},
-    {"mdia", read_mdia},
-    {NULL, NULL}
+    {BOX_TKHD, read_tkhd},
+    {BOX_MDIA, read_mdia},
+    {0, NULL}
   };
   struct box_moov * moov;
   box_t box;
@@ -2434,19 +2436,21 @@ read_trak(FILE * file, struct box_info * info, box_t p_box) {
   if ((ret = mem_realloc(&moov->trak,
                          (moov->trak_len + 1) * sizeof(* moov->trak))) != 0)
     return ret;
-  moov->trak_len++;
 
-  /* moov->trak would be freed at the top */
-  box.trak = &moov->trak[moov->trak_len - 1];
-  return read_box(file, info, box, funcs);
+  box.trak = &moov->trak[moov->trak_len];
+  if ((ret = read_box(file, info, box, funcs)) != 0)
+    return ret;
+
+  moov->trak_len++;
+  return 0;
 }
 
 static int
 read_moov(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
-    {"mvhd", read_mvhd},
-    {"trak", read_trak},
-    {NULL, NULL}
+    {BOX_MVHD, read_mvhd},
+    {BOX_TRAK, read_trak},
+    {0, NULL}
   };
   box_t box;
   box.moov = &p_box.top->moov;
@@ -2467,33 +2471,25 @@ read_mdat(FILE * file, struct box_info * info, box_t p_box) {
 }
 
 static int
-read_file(FILE * file, struct box_info * info, box_t box) {
+read_file(FILE * file, struct box_info * info, struct box_top * top) {
+  box_t box;
   static struct box_func_pair funcs[] = {
-    {"ftyp", read_ftyp},
-    {"moov", read_moov},
-    {"mdat", read_mdat},
-    {NULL, NULL}
+    {BOX_FTYP, read_ftyp},
+    {BOX_MOOV, read_moov},
+    {BOX_MDAT, read_mdat},
+    {0, NULL}
   };
+  box.top = top;
   return read_box(file, info, box, funcs);
 }
 
-int
-main(int argc, char ** argv) {
-  const char * fname;
+static int
+open_file(FILE ** file_p, struct box_info * info,
+          struct box_top * top, const char * fname) {
   FILE * file;
-  struct box_info info;
   long size;
-  struct box_top top;
-  box_t box;
-  unsigned int i;
-  unsigned int j;
   int ret;
 
-  (void) argc;
-  (void) argv;
-
-  /* open file */
-  fname = "standbyme.mp4";
   file = fopen(fname, "rb");
   if (file == NULL) {
     ret = ERR_IO;
@@ -2502,45 +2498,65 @@ main(int argc, char ** argv) {
 
   if (fseek(file, 0, SEEK_END) == -1) {
     ret = ERR_IO;
-    goto exit;
+    goto close;
   }
 
   if ((ret = get_pos(&size, file)) != 0)
-    goto exit;
+    goto close;
 
   if (fseek(file, 0, SEEK_SET) == -1) {
     ret = ERR_IO;
-    goto exit;
+    goto close;
   }
 
-  info.pos = 0;
-  info.size = (unsigned int) size;
-  memcpy(info.type, "file", 4);
+  info->pos = 0;
+  info->size = (unsigned int) size;
+  info->type = BOX_TOP;
 
-  box.top = &top;
+  top->ftyp.c_brands = NULL;
+  top->moov.trak = NULL;
+  top->moov.trak_len = 0;
 
-  top.ftyp.c_brands = NULL;
-  top.moov.trak = NULL;
-  top.moov.trak_len = 0;
+  * file_p = file;
+close:
+  if (ret)
+    fclose(file);
+exit:
+  return ret;
+}
 
-  ret = read_file(file, &info, box);
+static void
+close_file(FILE * file, struct box_top * top) {
+  unsigned int i;
 
-  for (i = 0; i < top.moov.trak_len; i++) {
-    struct box_trak * trak;
-    trak = top.moov.trak;
-    for (j = 0; j < trak[i].mdia.minf.stbl.stsd.entry_count; j++)
-      free_visual_sample_entry(&trak[i].mdia.minf.stbl.stsd.entry.v_entry[j]);
-    mem_free(trak[i].mdia.minf.stbl.stsd.entry.v_entry);
-    for (j = 0; j < trak[i].mdia.minf.dinf.dref.entry_count; j++)
-      free_data_entry(&trak[i].mdia.minf.dinf.dref.entry[j]);
-    mem_free(trak[i].mdia.minf.dinf.dref.entry);
-    mem_free(trak[i].mdia.hdlr.name);
-  }
+  for (i = 0; i < top->moov.trak_len; i++)
+    free_mdia(&top->moov.trak[i].mdia);
 
-  mem_free(top.moov.trak);
-  mem_free(top.ftyp.c_brands);
+  mem_free(top->moov.trak);
+  mem_free(top->ftyp.c_brands);
 
   fclose(file);
+}
+
+int
+main(int argc, char ** argv) {
+  const char * fname;
+  FILE * file;
+  struct box_info info;
+  struct box_top top;
+  int ret;
+
+  (void) argc;
+  (void) argv;
+
+  /* open file */
+  fname = "standbyme.mp4";
+  if ((ret = open_file(&file, &info, &top, fname)) != 0)
+    goto exit;
+
+  ret = read_file(file, &info, &top);
+
+  close_file(file, &top);
 exit:
   if (ret)
     printf("Error: %s\n", err_to_str(ret));
