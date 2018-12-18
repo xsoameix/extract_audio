@@ -24,6 +24,7 @@ enum {
   ERR_UNK_ES_FLAGS,
   ERR_UNK_ID,
   ERR_EMPTY_BITS,
+  ERR_ENTRY_COUNT,
   ERR_LEN
 };
 
@@ -59,7 +60,9 @@ enum {
   BOX_URN  = MKBOX('u', 'r', 'n', ' '),
   BOX_STBL = MKBOX('s', 't', 'b', 'l'),
   BOX_STSD = MKBOX('s', 't', 's', 'd'),
+  BOX_AVC1 = MKBOX('a', 'v', 'c', '1'),
   BOX_AVCC = MKBOX('a', 'v', 'c', 'C'),
+  BOX_MP4A = MKBOX('m', 'p', '4', 'a'),
   BOX_ESDS = MKBOX('e', 's', 'd', 's'),
   BOX_STTS = MKBOX('s', 't', 't', 's'),
   BOX_STSC = MKBOX('s', 't', 's', 'c'),
@@ -79,6 +82,7 @@ union box {
   struct box_mdia * mdia;
   struct box_minf * minf;
   struct box_dinf * dinf;
+  struct box_dref * dref;
   struct box_stsd * stsd;
   struct box_vide * vide;
   struct box_soun * soun;
@@ -255,6 +259,7 @@ err_to_str(int i) {
     "Unknown tag",
     "Unknown ES flags",
     "Unknown object type indication",
+    "entry_count do not match",
     "Empty bits"
   };
   if (i < 0 || i >= ERR_LEN)
@@ -624,13 +629,19 @@ read_ftyp(FILE * file, struct box_info * info, box_t p_box) {
   len = (info->size - (unsigned int) (pos - info->pos)) / 4;
   if (len > 0) {
 
-    /* compatible brands */
-    if ((ret = mem_alloc(&c_brands, len * sizeof(c_brands[0]))) != 0 ||
-        (ret = read_ary(c_brands, sizeof(c_brands[0]), len, file)) != 0)
+    if ((ret = mem_alloc(&c_brands, len * sizeof(c_brands[0]))) != 0)
       goto exit;
+
+    if ((ret = read_ary(c_brands, sizeof(c_brands[0]), len, file)) != 0)
+      goto free;
 
     for (i = 0; i < len; i++)
       attr_c32("compatible brand", c_brands[i]);
+free:
+    if (ret) {
+      mem_free(c_brands);
+      goto exit;
+    }
   }
   ftyp = &p_box.top->ftyp;
   memcpy(ftyp->m_brand, m_brand, sizeof(m_brand));
@@ -859,35 +870,36 @@ read_hdlr(FILE * file, struct box_info * info, box_t p_box) {
 }
 
 static int
-read_dref_entry(FILE * file, struct box_dref_entry * entry) {
-  unsigned int box_size;
-  unsigned int box_type;
+read_dref_entry(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
   unsigned char self_contained;
   char * name;
   char * location;
+  struct box_dref * dref;
+  struct box_dref_entry * entry;
   int ret;
 
   ret = 0;
 
-  if ((ret = read_u32(&box_size, file)) != 0 ||
-      (ret = read_u32(&box_type, file)) != 0 ||
-      (ret = read_ver(&version, &flags, file)) != 0)
+  if ((ret = read_ver(&version, &flags, file)) != 0)
     goto exit;
-
-  indent(0); printf("[%.4s %u]\n", box_to_str(box_type), box_size);
-
-  indent(1);
 
   self_contained = flags & 0x1;
 
   ATTR_U(self_contained);
 
+  dref = p_box.dref;
+  if ((ret = mem_realloc(&dref->entry, (dref->entry_count + 1) *
+                         sizeof(* dref->entry))) != 0)
+    goto exit;
+
+  entry = &dref->entry[dref->entry_count];
+
   name = NULL;
   location = NULL;
 
-  if (box_type == BOX_URL) {
+  if (info->type == BOX_URL) {
 
     if (self_contained == 0) {
 
@@ -896,7 +908,7 @@ read_dref_entry(FILE * file, struct box_dref_entry * entry) {
 
       ATTR_STR(location);
     }
-  } else if (box_type == BOX_URN) {
+  } else if (info->type == BOX_URN) {
 
     if ((ret = read_str(&name, file)) != 0)
       goto exit;
@@ -914,12 +926,13 @@ free:
     ret = ERR_UNK_BOX;
     goto exit;
   }
-  entry->type = box_type;
+  entry->type = info->type;
   entry->self_contained = self_contained;
   entry->name = name;
   entry->location = location;
+
+  dref->entry_count++;
 exit:
-  indent(-1);
   return ret;
 }
 
@@ -934,49 +947,29 @@ read_dref(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
   unsigned int entry_count;
-  unsigned int i;
-  unsigned int j;
-  struct box_dref_entry * entry;
+  static struct box_func_pair funcs[] = {
+    {BOX_URL, read_dref_entry},
+    {BOX_URN, read_dref_entry},
+    {0, NULL}
+  };
   struct box_dref * dref;
+  box_t box;
   int ret;
-
-  (void) info;
-
-  ret = 0;
 
   if ((ret = read_ver(&version, &flags, file)) != 0 ||
       (ret = read_u32(&entry_count, file)) != 0)
-    goto exit;
+    return ret;
 
   ATTR_U(entry_count);
 
-  entry = NULL;
+  box.dref = dref = &p_box.dinf->dref;
+  if ((ret = read_box(file, info, box, funcs)) != 0)
+    return ret;
 
-  if (entry_count) {
+  if (dref->entry_count != entry_count)
+    return ERR_ENTRY_COUNT;
 
-    if ((ret = mem_alloc(&entry, entry_count * sizeof(* entry))) != 0)
-      goto exit;
-
-    for (i = 0; i < entry_count; i++) {
-      if ((ret = read_dref_entry(file, &entry[i])) != 0)
-        goto free;
-    }
-free:
-    if (ret) {
-      for (j = 0; j < i; j++)
-        free_dref_entry(&entry[j]);
-      goto exit;
-    }
-  }
-
-  dref = &p_box.dinf->dref;
-  dref->entry_count = entry_count;
-  dref->entry = entry;
-
-exit:
-  if (ret)
-    mem_free(entry);
-  return ret;
+  return 0;
 }
 
 static int
@@ -988,120 +981,6 @@ read_dinf(FILE * file, struct box_info * info, box_t p_box) {
   box_t box;
   box.dinf = &p_box.mdia->minf.dinf;
   return read_box(file, info, box, funcs);
-}
-
-static int
-read_vide(FILE * file, struct box_vide * vide) {
-  unsigned int box_size;
-  unsigned int box_type;
-  unsigned short dref_index; /* data reference index */
-  unsigned short width;
-  unsigned short height;
-  unsigned int h_rez;
-  unsigned int v_rez;
-  unsigned short frame_count;
-  unsigned char len;
-  char compressorname[32];
-  unsigned short depth;
-  int ret;
-
-  ret = 0;
-
-  if ((ret = read_u32(&box_size, file)) != 0 ||
-      (ret = read_u32(&box_type, file)) != 0 ||
-      (ret = skip(file, 6)) != 0 || /* reserved */
-      (ret = read_u16(&dref_index, file)) != 0 ||
-      (ret = skip(file, 2 + 2 + 4 * 3)) != 0 || /* pre / reserved / pre */
-      (ret = read_u16(&width, file)) != 0 ||
-      (ret = read_u16(&height, file)) != 0 ||
-      (ret = read_u32(&h_rez, file)) != 0 ||
-      (ret = read_u32(&v_rez, file)) != 0 ||
-      (ret = skip(file, 4)) != 0 || /* reserved */
-      (ret = read_u16(&frame_count, file)) != 0 ||
-      (ret = read_u8(&len, file)) != 0 ||
-      (ret = read_ary(compressorname,
-                      sizeof(compressorname) - 1, 1, file)) != 0 ||
-      (ret = read_u16(&depth, file)) != 0 ||
-      (ret = skip(file, 2)) != 0) /* pre defined */
-    goto exit;
-
-  compressorname[len] = '\0';
-
-  indent(0); printf("[%.4s %u]\n", box_to_str(box_type), box_size);
-
-  indent(1);
-
-  ATTR_U(dref_index);
-  ATTR_U(width);
-  ATTR_U(height);
-  ATTR_U_16(h_rez);
-  ATTR_U_16(v_rez);
-  ATTR_U(frame_count);
-  ATTR_STR(compressorname);
-  ATTR_U(depth);
-
-  vide->dref_index = dref_index;
-  vide->width = width;
-  vide->height = height;
-  vide->h_rez = h_rez;
-  vide->v_rez = v_rez;
-  vide->frame_count = frame_count;
-  memcpy(vide->compressorname, compressorname, sizeof(compressorname));
-  vide->depth = depth;
-exit:
-  indent(-1);
-  return ret;
-}
-
-static void
-free_vide(struct box_vide * vide) {
-  (void) vide;
-}
-
-static int
-read_soun(FILE * file, struct box_soun * soun) {
-  unsigned int box_size;
-  unsigned int box_type;
-  unsigned short dref_index; /* data reference index */
-  unsigned short channelcount;
-  unsigned short samplesize;
-  unsigned int samplerate;
-  int ret;
-
-  ret = 0;
-
-  if ((ret = read_u32(&box_size, file)) != 0 ||
-      (ret = read_u32(&box_type, file)) != 0 ||
-      (ret = skip(file, 6)) != 0 || /* reserved */
-      (ret = read_u16(&dref_index, file)) != 0 ||
-      (ret = skip(file, 4 * 2)) != 0 || /* reserved */
-      (ret = read_u16(&channelcount, file)) != 0 ||
-      (ret = read_u16(&samplesize, file)) != 0 ||
-      (ret = skip(file, 2 + 2)) != 0 || /* pre defined / reserved */
-      (ret = read_u32(&samplerate, file)) != 0)
-    goto exit;
-
-  indent(0); printf("[%.4s %u]\n", box_to_str(box_type), box_size);
-
-  indent(1);
-
-  ATTR_U(dref_index);
-  ATTR_U(channelcount);
-  ATTR_U(samplesize);
-  ATTR_U_16(samplerate);
-
-  soun->dref_index = dref_index;
-  soun->channelcount = channelcount;
-  soun->samplesize = samplesize;
-  soun->samplerate = samplerate;
-exit:
-  indent(-1);
-  return ret;
-}
-
-static void
-free_soun(struct box_soun * soun) {
-  (void) soun;
 }
 
 struct bits {
@@ -1837,6 +1716,90 @@ exit:
 }
 
 static int
+read_vide(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned short dref_index; /* data reference index */
+  unsigned short width;
+  unsigned short height;
+  unsigned int h_rez;
+  unsigned int v_rez;
+  unsigned short frame_count;
+  unsigned char len;
+  char compressorname[32];
+  unsigned short depth;
+  static struct box_func_pair funcs[] = {
+    {BOX_AVCC, read_avcc},
+    {0, NULL}
+  };
+  struct box_stsd * stsd;
+  struct box_vide * vide;
+  box_t box;
+  int ret;
+
+  ret = 0;
+
+  if (p_box.mdia->hdlr.type != BOX_VIDE) {
+    ret = ERR_UNK_HDLR_TYPE;
+    goto exit;
+  }
+
+  stsd = &p_box.mdia->minf.stbl.stsd;
+  if ((ret = mem_realloc(&stsd->entry.vide, (stsd->entry_count + 1) *
+                         sizeof(* stsd->entry.vide))) != 0)
+    goto exit;
+
+  vide = &stsd->entry.vide[stsd->entry_count];
+
+  if ((ret = skip(file, 6)) != 0 || /* reserved */
+      (ret = read_u16(&dref_index, file)) != 0 ||
+      (ret = skip(file, 2 + 2 + 4 * 3)) != 0 || /* pre / reserved / pre */
+      (ret = read_u16(&width, file)) != 0 ||
+      (ret = read_u16(&height, file)) != 0 ||
+      (ret = read_u32(&h_rez, file)) != 0 ||
+      (ret = read_u32(&v_rez, file)) != 0 ||
+      (ret = skip(file, 4)) != 0 || /* reserved */
+      (ret = read_u16(&frame_count, file)) != 0 ||
+      (ret = read_u8(&len, file)) != 0 ||
+      (ret = read_ary(compressorname,
+                      sizeof(compressorname) - 1, 1, file)) != 0 ||
+      (ret = read_u16(&depth, file)) != 0 ||
+      (ret = skip(file, 2)) != 0) /* pre defined */
+    goto exit;
+
+  compressorname[len] = '\0';
+
+  ATTR_U(dref_index);
+  ATTR_U(width);
+  ATTR_U(height);
+  ATTR_U_16(h_rez);
+  ATTR_U_16(v_rez);
+  ATTR_U(frame_count);
+  ATTR_STR(compressorname);
+  ATTR_U(depth);
+
+  box.vide = vide;
+  if ((ret = read_box(file, info, box, funcs)) != 0)
+    goto exit;
+
+  vide->dref_index = dref_index;
+  vide->width = width;
+  vide->height = height;
+  vide->h_rez = h_rez;
+  vide->v_rez = v_rez;
+  vide->frame_count = frame_count;
+  memcpy(vide->compressorname, compressorname, sizeof(compressorname));
+  vide->depth = depth;
+
+  stsd->entry_count++;
+exit:
+  return ret;
+}
+
+static void
+free_vide(struct box_vide * vide) {
+  (void) vide;
+}
+
+static int
 read_tag(unsigned char * ret_tag, unsigned int * ret_len, FILE * file) {
   unsigned char tag;
   unsigned int len;
@@ -2036,97 +1999,94 @@ free:
 }
 
 static int
-read_stsd(FILE * file, struct box_info * info, box_t p_box) {
-  unsigned char version;
-  unsigned int flags;
-  unsigned int entry_count;
-  unsigned int i;
-  unsigned int j;
-  box_t entry;
-  struct box_hdlr * hdlr;
-  struct box_stsd * stsd;
-  box_t box;
+read_soun(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned short dref_index; /* data reference index */
+  unsigned short channelcount;
+  unsigned short samplesize;
+  unsigned int samplerate;
   static struct box_func_pair funcs[] = {
-    {BOX_AVCC, read_avcc},
     {BOX_ESDS, read_esds},
     {0, NULL}
   };
+  struct box_stsd * stsd;
+  struct box_soun * soun;
+  box_t box;
   int ret;
 
   ret = 0;
 
+  if (p_box.mdia->hdlr.type != BOX_SOUN) {
+    ret = ERR_UNK_HDLR_TYPE;
+    goto exit;
+  }
+
+  stsd = &p_box.mdia->minf.stbl.stsd;
+  if ((ret = mem_realloc(&stsd->entry.soun, (stsd->entry_count + 1) *
+                         sizeof(* stsd->entry.soun))) != 0)
+    goto exit;
+
+  soun = &stsd->entry.soun[stsd->entry_count];
+
+  if ((ret = skip(file, 6)) != 0 || /* reserved */
+      (ret = read_u16(&dref_index, file)) != 0 ||
+      (ret = skip(file, 4 * 2)) != 0 || /* reserved */
+      (ret = read_u16(&channelcount, file)) != 0 ||
+      (ret = read_u16(&samplesize, file)) != 0 ||
+      (ret = skip(file, 2 + 2)) != 0 || /* pre defined / reserved */
+      (ret = read_u32(&samplerate, file)) != 0)
+    goto exit;
+
+  ATTR_U(dref_index);
+  ATTR_U(channelcount);
+  ATTR_U(samplesize);
+  ATTR_U_16(samplerate);
+
+  box.soun = soun;
+  if ((ret = read_box(file, info, box, funcs)) != 0)
+    goto exit;
+
+  soun->dref_index = dref_index;
+  soun->channelcount = channelcount;
+  soun->samplesize = samplesize;
+  soun->samplerate = samplerate;
+
+  stsd->entry_count++;
+exit:
+  return ret;
+}
+
+static void
+free_soun(struct box_soun * soun) {
+  (void) soun;
+}
+
+static int
+read_stsd(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int entry_count;
+  struct box_stsd * stsd;
+  static struct box_func_pair funcs[] = {
+    {BOX_AVC1, read_vide},
+    {BOX_MP4A, read_soun},
+    {0, NULL}
+  };
+  int ret;
+
   if ((ret = read_ver(&version, &flags, file)) != 0 ||
       (ret = read_u32(&entry_count, file)) != 0)
-    goto exit;
+    return ret;
 
   ATTR_U(entry_count);
 
-  entry.vide = NULL;
+  if ((ret = read_box(file, info, p_box, funcs)) != 0)
+    return ret;
 
-  if (entry_count) {
+  stsd = &p_box.mdia->minf.stbl.stsd;
+  if (stsd->entry_count != entry_count)
+    return ERR_ENTRY_COUNT;
 
-    hdlr = &p_box.mdia->hdlr;
-    if (hdlr->type == BOX_VIDE) {
-      struct box_vide * v;
-
-      if ((ret = mem_alloc(&v, entry_count * sizeof(* v))) != 0)
-        goto exit;
-
-      for (i = 0; i < entry_count; i++)
-        if ((ret = read_vide(file, &v[i])) != 0)
-          goto free_vide;
-
-      entry.vide = v;
-free_vide:
-      if (ret) {
-        for (j = 0; j < i; j++)
-          free_vide(&v[j]);
-        mem_free(v);
-      }
-    } else if (hdlr->type == BOX_SOUN) {
-      struct box_soun * s;
-
-      if ((ret = mem_alloc(&s, entry_count * sizeof(* s))) != 0)
-        goto exit;
-
-      for (i = 0; i < entry_count; i++)
-        if ((ret = read_soun(file, &s[i])) != 0)
-          goto free_soun;
-
-      entry.soun = s;
-free_soun:
-      if (ret) {
-        for (j = 0; j < i; j++)
-          free_soun(&s[j]);
-        mem_free(s);
-      }
-    } else {
-      ret = ERR_UNK_HDLR_TYPE;
-      goto exit;
-    }
-  }
-
-  box.stsd = &p_box.mdia->minf.stbl.stsd;
-  if ((ret = read_box(file, info, box, funcs)) != 0)
-    goto free;
-
-  stsd = box.stsd;
-  stsd->entry_count = entry_count;
-  stsd->entry = entry;
-free:
-  if (ret) {
-    if (hdlr->type == BOX_VIDE) {
-      for (i = 0; i < entry_count; i++)
-        free_vide(&entry.vide[i]);
-      mem_free(entry.vide);
-    } else if (hdlr->type == BOX_SOUN) {
-      for (i = 0; i < entry_count; i++)
-        free_soun(&entry.soun[i]);
-      mem_free(entry.soun);
-    }
-  }
-exit:
-  return ret;
+  return 0;
 }
 
 static int
@@ -2402,25 +2362,6 @@ read_mdia(FILE * file, struct box_info * info, box_t p_box) {
   return read_box(file, info, box, funcs);
 }
 
-static void
-free_mdia(struct box_mdia * mdia) {
-  unsigned int i;
-
-  if (mdia->hdlr.type == BOX_VIDE) {
-    for (i = 0; i < mdia->minf.stbl.stsd.entry_count; i++)
-      free_vide(&mdia->minf.stbl.stsd.entry.vide[i]);
-    mem_free(mdia->minf.stbl.stsd.entry.vide);
-  } else if (mdia->hdlr.type == BOX_SOUN) {
-    for (i = 0; i < mdia->minf.stbl.stsd.entry_count; i++)
-      free_soun(&mdia->minf.stbl.stsd.entry.soun[i]);
-    mem_free(mdia->minf.stbl.stsd.entry.soun);
-  }
-  for (i = 0; i < mdia->minf.dinf.dref.entry_count; i++)
-    free_dref_entry(&mdia->minf.dinf.dref.entry[i]);
-  mem_free(mdia->minf.dinf.dref.entry);
-  mem_free(mdia->hdlr.name);
-}
-
 static int
 read_trak(FILE * file, struct box_info * info, box_t p_box) {
   static struct box_func_pair funcs[] = {
@@ -2438,11 +2379,36 @@ read_trak(FILE * file, struct box_info * info, box_t p_box) {
     return ret;
 
   box.trak = &moov->trak[moov->trak_len];
+  box.trak->mdia.minf.dinf.dref.entry = NULL;
+  box.trak->mdia.minf.dinf.dref.entry_count = 0;
+  box.trak->mdia.minf.stbl.stsd.entry.vide = NULL;
+  box.trak->mdia.minf.stbl.stsd.entry_count = 0;
   if ((ret = read_box(file, info, box, funcs)) != 0)
     return ret;
 
   moov->trak_len++;
   return 0;
+}
+
+static void
+free_trak(struct box_trak * trak) {
+  struct box_mdia * mdia;
+  unsigned int i;
+
+  mdia = &trak->mdia;
+  if (mdia->hdlr.type == BOX_VIDE) {
+    for (i = 0; i < mdia->minf.stbl.stsd.entry_count; i++)
+      free_vide(&mdia->minf.stbl.stsd.entry.vide[i]);
+    mem_free(mdia->minf.stbl.stsd.entry.vide);
+  } else if (mdia->hdlr.type == BOX_SOUN) {
+    for (i = 0; i < mdia->minf.stbl.stsd.entry_count; i++)
+      free_soun(&mdia->minf.stbl.stsd.entry.soun[i]);
+    mem_free(mdia->minf.stbl.stsd.entry.soun);
+  }
+  for (i = 0; i < mdia->minf.dinf.dref.entry_count; i++)
+    free_dref_entry(&mdia->minf.dinf.dref.entry[i]);
+  mem_free(mdia->minf.dinf.dref.entry);
+  mem_free(mdia->hdlr.name);
 }
 
 static int
@@ -2530,7 +2496,7 @@ close_file(FILE * file, struct box_top * top) {
   unsigned int i;
 
   for (i = 0; i < top->moov.trak_len; i++)
-    free_mdia(&top->moov.trak[i].mdia);
+    free_trak(&top->moov.trak[i]);
 
   mem_free(top->moov.trak);
   mem_free(top->ftyp.c_brands);
