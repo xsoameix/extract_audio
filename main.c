@@ -25,6 +25,7 @@ enum {
   ERR_UNK_ID,
   ERR_EMPTY_BITS,
   ERR_ENTRY_COUNT,
+  ERR_NO_AVCC,
   ERR_LEN
 };
 
@@ -157,6 +158,114 @@ struct box_dinf {
   struct box_dref dref;
 };
 
+struct vui {
+  unsigned char aspect_ratio_info_present_flag;
+  unsigned char aspect_ratio_idc;
+
+  unsigned char overscan_info_present_flag;
+
+  unsigned char video_signal_type_present_flag;
+  unsigned char video_format;
+  unsigned char video_full_range_flag;
+
+  unsigned char colour_description_present_flag;
+  unsigned char colour_primaries;
+  unsigned char transfer_characteristics;
+  unsigned char matrix_coefficients;
+
+  unsigned char chroma_loc_info_present_flag;
+
+  unsigned char timing_info_present_flag;
+  unsigned int num_units_in_tick;
+  unsigned int time_scale;
+  unsigned char fixed_frame_rate_flag;
+
+  unsigned char nal_hrd_para_present_flag;
+  unsigned char vcl_hrd_para_present_flag;
+  unsigned char pic_struct_present_flag;
+
+  unsigned char bitstream_restriction_flag;
+  unsigned char motion_vectors_over_pic_boundaries_flag;
+  unsigned char max_bytes_per_pic_denom;
+  unsigned char max_bits_per_mb_denom;
+  unsigned char log2_max_mv_length_horizontal;
+  unsigned char log2_max_mv_length_vertical;
+  unsigned int num_reorder_frames;
+  unsigned int max_dec_frame_buffering;
+};
+
+struct sps {
+  unsigned char nal_ref_idc;
+  unsigned char nal_unit_type;
+  unsigned char profile_idc;
+  unsigned char c_set0_flag;
+  unsigned char c_set1_flag;
+  unsigned char c_set2_flag;
+  unsigned char c_set3_flag;
+  unsigned char c_set4_flag;
+  unsigned char c_set5_flag;
+  unsigned char level_idc;
+  unsigned char seq_para_set_id;
+  unsigned char log2_max_frame_num_minus4;
+  unsigned char pic_order_cnt_type;
+  unsigned int max_num_ref_frames;
+  unsigned char gaps_in_frame_num_value_allowed_flag;
+  unsigned int pic_width_in_mbs_minus_1;
+  unsigned int pic_height_in_mbs_minus_1;
+  unsigned char frame_mbs_only_flag;
+  unsigned char mb_adaptive_frame_field_flag;
+  unsigned char direct_8x8_inference_flag;
+  unsigned char frame_cropping_flag;
+  unsigned int frame_crop_left_offset;
+  unsigned int frame_crop_right_offset;
+  unsigned int frame_crop_top_offset;
+  unsigned int frame_crop_bottom_offset;
+  unsigned char vui_para_present_flag;
+  struct vui vui;
+};
+
+struct pps {
+  unsigned char nal_ref_idc;
+  unsigned char nal_unit_type;
+  unsigned char pic_para_set_id;
+  unsigned char seq_para_set_id;
+  unsigned char entropy_coding_mode_flag;
+  unsigned char pic_order_present_flag;
+  unsigned char num_slice_groups_minus1;
+  unsigned char num_ref_idx_10_active_minus1;
+  unsigned char num_ref_idx_11_active_minus1;
+  unsigned char weighted_pred_flag;
+  unsigned char weighted_bipred_idc;
+  unsigned char pic_init_qp_minus26;
+  unsigned char pic_init_qs_minus26;
+  unsigned char chroma_qp_index_offset;
+  unsigned char deblocking_filter_control_present_flag;
+  unsigned char constrained_intra_pred_flag;
+  unsigned char redundant_pic_cnt_present_flag;
+};
+
+union nalu {
+  struct sps * sps;
+  struct pps * pps;
+};
+
+struct box_avcc {
+  unsigned char conf_version;
+  unsigned char profile_idc;
+  unsigned char c_set0_flag;
+  unsigned char c_set1_flag;
+  unsigned char c_set2_flag;
+  unsigned char c_set3_flag;
+  unsigned char c_set4_flag;
+  unsigned char c_set5_flag;
+  unsigned char level_idc;
+  unsigned char len_size_minus_one;
+  unsigned char num_of_sps;
+  unsigned char num_of_pps;
+  union nalu sps;
+  union nalu pps;
+};
+
 struct box_vide {
   unsigned short dref_index;
   unsigned short width;
@@ -166,6 +275,7 @@ struct box_vide {
   unsigned short frame_count;
   unsigned short depth;
   char compressorname[32];
+  struct box_avcc avcc;
 };
 
 struct box_soun {
@@ -260,7 +370,8 @@ err_to_str(int i) {
     "Unknown ES flags",
     "Unknown object type indication",
     "entry_count do not match",
-    "Empty bits"
+    "Empty bits",
+    "no avcc"
   };
   if (i < 0 || i >= ERR_LEN)
     return NULL;
@@ -1225,7 +1336,7 @@ exit:
 #endif
 
 static int
-read_vui_para(struct bits * bits) {
+read_vui_para(struct vui * vui, struct bits * bits) {
   unsigned char aspect_ratio_info_present_flag;
   unsigned char aspect_ratio_idc;
 
@@ -1253,10 +1364,10 @@ read_vui_para(struct bits * bits) {
 
   unsigned char bitstream_restriction_flag;
   unsigned char motion_vectors_over_pic_boundaries_flag;
-  unsigned int max_bytes_per_pic_denom;
-  unsigned int max_bits_per_mb_denom;
-  unsigned int log2_max_mv_length_horizontal;
-  unsigned int log2_max_mv_length_vertical;
+  unsigned char max_bytes_per_pic_denom;
+  unsigned char max_bits_per_mb_denom;
+  unsigned char log2_max_mv_length_horizontal;
+  unsigned char log2_max_mv_length_vertical;
   unsigned int num_reorder_frames;
   unsigned int max_dec_frame_buffering;
 
@@ -1386,10 +1497,10 @@ read_vui_para(struct bits * bits) {
 
   if (bitstream_restriction_flag) {
     if ((ret = read_bit(&motion_vectors_over_pic_boundaries_flag, bits)) != 0 ||
-        (ret = read_code(&max_bytes_per_pic_denom, bits)) != 0 ||
-        (ret = read_code(&max_bits_per_mb_denom, bits)) != 0 ||
-        (ret = read_code(&log2_max_mv_length_horizontal, bits)) != 0 ||
-        (ret = read_code(&log2_max_mv_length_vertical, bits)) != 0 ||
+        (ret = read_code_8(&max_bytes_per_pic_denom, bits)) != 0 ||
+        (ret = read_code_8(&max_bits_per_mb_denom, bits)) != 0 ||
+        (ret = read_code_8(&log2_max_mv_length_horizontal, bits)) != 0 ||
+        (ret = read_code_8(&log2_max_mv_length_vertical, bits)) != 0 ||
         (ret = read_code(&num_reorder_frames, bits)) != 0 ||
         (ret = read_code(&max_dec_frame_buffering, bits)) != 0)
       goto exit;
@@ -1404,14 +1515,58 @@ read_vui_para(struct bits * bits) {
     ATTR_U(max_dec_frame_buffering);
     indent(-1);
   }
+
+  vui->aspect_ratio_info_present_flag = aspect_ratio_info_present_flag;
+  if (aspect_ratio_info_present_flag)
+    vui->aspect_ratio_idc = aspect_ratio_idc;
+
+  vui->overscan_info_present_flag = overscan_info_present_flag;
+
+  vui->video_signal_type_present_flag = video_signal_type_present_flag;
+  if (video_signal_type_present_flag) {
+    vui->video_format = video_format;
+    vui->video_full_range_flag = video_format;
+
+    vui->colour_description_present_flag = colour_description_present_flag;
+    if (colour_description_present_flag) {
+      vui->colour_primaries = colour_primaries;
+      vui->transfer_characteristics = transfer_characteristics;
+      vui->matrix_coefficients = matrix_coefficients;
+    }
+  }
+
+  vui->chroma_loc_info_present_flag = chroma_loc_info_present_flag;
+
+  vui->timing_info_present_flag = timing_info_present_flag;
+  if (timing_info_present_flag) {
+    vui->num_units_in_tick = num_units_in_tick;
+    vui->time_scale = time_scale;
+    vui->fixed_frame_rate_flag = fixed_frame_rate_flag;
+  }
+
+  vui->nal_hrd_para_present_flag = nal_hrd_para_present_flag;
+  vui->vcl_hrd_para_present_flag = vcl_hrd_para_present_flag;
+  vui->pic_struct_present_flag = pic_struct_present_flag;
+
+  vui->bitstream_restriction_flag = bitstream_restriction_flag;
+  if (bitstream_restriction_flag) {
+    vui->motion_vectors_over_pic_boundaries_flag =
+        motion_vectors_over_pic_boundaries_flag;
+    vui->max_bytes_per_pic_denom = max_bytes_per_pic_denom;
+    vui->max_bits_per_mb_denom = max_bits_per_mb_denom;
+    vui->log2_max_mv_length_horizontal = log2_max_mv_length_horizontal;
+    vui->log2_max_mv_length_vertical = log2_max_mv_length_vertical;
+    vui->num_reorder_frames = num_reorder_frames;
+    vui->max_dec_frame_buffering = max_dec_frame_buffering;
+  }
 exit:
   return ret;
 }
 
 static int
-read_nalu(unsigned int size /* size of NALU */, FILE * file) {
-  unsigned char ref_idc;
-  unsigned char type;
+read_nalu(union nalu ret_nalu, unsigned int size, FILE * file) {
+  unsigned char nal_ref_idc;
+  unsigned char nal_unit_type;
   unsigned int rbsp_size;
   unsigned char * nalu;
   unsigned char * rbsp;
@@ -1427,11 +1582,11 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
   if ((ret = read_ary(nalu, size, 1, file)) != 0)
     goto free;
 
-  ref_idc = (unsigned char) ((nalu[0] >> 5) & 0x3);
-  type = (unsigned char) (nalu[0] & 0x1f);
+  nal_ref_idc = (unsigned char) ((nalu[0] >> 5) & 0x3);
+  nal_unit_type = (unsigned char) (nalu[0] & 0x1f);
 
-  attr_u("nal_ref_idc", ref_idc);
-  attr_u("nal_unit_type", type);
+  ATTR_U(nal_ref_idc);
+  ATTR_U(nal_unit_type);
 
   rbsp = nalu;
   rbsp_size = 0;
@@ -1445,17 +1600,20 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
     }
   }
 
-  if (type == 0x7) {
+  if (nal_unit_type == 0x7) {
     unsigned char profile_idc; /* AVC profile indication */
     unsigned char profile_comp; /* profile compatibility */
     unsigned char c_set0_flag; /* constraint set 0 flag */
     unsigned char c_set1_flag; /* constraint set 1 flag */
     unsigned char c_set2_flag; /* constraint set 2 flag */
+    unsigned char c_set3_flag; /* constraint set 3 flag */
+    unsigned char c_set4_flag; /* constraint set 4 flag */
+    unsigned char c_set5_flag; /* constraint set 5 flag */
     unsigned char level_idc; /* AVC level indication */
     unsigned char seq_para_set_id; /* seq parameter set id */
     unsigned char log2_max_frame_num_minus4; /* MaxFrameNum used in frame_num */
     unsigned char pic_order_cnt_type; /* to decode picture order count */
-    unsigned int num_ref_frames;
+    unsigned int max_num_ref_frames;
     unsigned char gaps_in_frame_num_value_allowed_flag;
     unsigned int pic_width_in_mbs_minus_1;
     unsigned int pic_height_in_mbs_minus_1;
@@ -1468,6 +1626,7 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
     unsigned int frame_crop_top_offset;
     unsigned int frame_crop_bottom_offset;
     unsigned char vui_para_present_flag;
+    struct sps * sps;
 
     if ((ret = init_bits(&bits, rbsp, rbsp_size)) != 0 ||
         (ret = read_bits_8(&profile_idc, 8, &bits)) != 0 ||
@@ -1481,11 +1640,17 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
     c_set0_flag = (unsigned char) ((profile_comp >> 7) & 0x1);
     c_set1_flag = (unsigned char) ((profile_comp >> 6) & 0x1);
     c_set2_flag = (unsigned char) ((profile_comp >> 5) & 0x1);
+    c_set3_flag = (unsigned char) ((profile_comp >> 4) & 0x1);
+    c_set4_flag = (unsigned char) ((profile_comp >> 3) & 0x1);
+    c_set5_flag = (unsigned char) ((profile_comp >> 2) & 0x1);
 
     ATTR_U(profile_idc);
     attr_u("constraint_set0_flag", c_set0_flag);
     attr_u("constraint_set1_flag", c_set1_flag);
     attr_u("constraint_set2_flag", c_set2_flag);
+    attr_u("constraint_set3_flag", c_set3_flag);
+    attr_u("constraint_set4_flag", c_set4_flag);
+    attr_u("constraint_set5_flag", c_set5_flag);
     ATTR_U(level_idc);
     ATTR_U(seq_para_set_id);
     ATTR_U(log2_max_frame_num_minus4);
@@ -1497,14 +1662,14 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
       goto free;
     }
 
-    if ((ret = read_code(&num_ref_frames, &bits)) != 0 ||
+    if ((ret = read_code(&max_num_ref_frames, &bits)) != 0 ||
         (ret = read_bit(&gaps_in_frame_num_value_allowed_flag, &bits)) != 0 ||
         (ret = read_code(&pic_width_in_mbs_minus_1, &bits)) != 0 ||
         (ret = read_code(&pic_height_in_mbs_minus_1, &bits)) != 0 ||
         (ret = read_bit(&frame_mbs_only_flag, &bits)) != 0)
       goto free;
 
-    ATTR_U(num_ref_frames);
+    ATTR_U(max_num_ref_frames);
     ATTR_U(gaps_in_frame_num_value_allowed_flag);
     ATTR_U(pic_width_in_mbs_minus_1);
     ATTR_U(pic_height_in_mbs_minus_1);
@@ -1537,39 +1702,70 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
       ATTR_U(frame_crop_bottom_offset);
     }
 
+    sps = ret_nalu.sps;
+
     if ((ret = read_bit(&vui_para_present_flag, &bits)) != 0)
       goto free;
+
     ATTR_U(vui_para_present_flag);
 
     if (vui_para_present_flag) {
       indent(1);
-      if ((ret = read_vui_para(&bits)) != 0)
+      if ((ret = read_vui_para(&sps->vui, &bits)) != 0)
         goto free;
       indent(-1);
     }
-  } else if (type == 0x8) {
-    unsigned int pic_para_set_id;
-    unsigned int seq_para_set_id;
+    sps->nal_ref_idc = nal_ref_idc;
+    sps->nal_unit_type = nal_unit_type;
+    sps->profile_idc = profile_idc;
+    sps->c_set0_flag = c_set0_flag;
+    sps->c_set1_flag = c_set1_flag;
+    sps->c_set2_flag = c_set2_flag;
+    sps->c_set3_flag = c_set3_flag;
+    sps->c_set4_flag = c_set4_flag;
+    sps->c_set5_flag = c_set5_flag;
+    sps->level_idc = level_idc;
+    sps->seq_para_set_id = seq_para_set_id;
+    sps->log2_max_frame_num_minus4 = log2_max_frame_num_minus4;
+    sps->pic_order_cnt_type = pic_order_cnt_type;
+    sps->max_num_ref_frames = max_num_ref_frames;
+    sps->gaps_in_frame_num_value_allowed_flag =
+        gaps_in_frame_num_value_allowed_flag;
+    sps->pic_width_in_mbs_minus_1 = pic_width_in_mbs_minus_1;
+    sps->pic_height_in_mbs_minus_1 = pic_height_in_mbs_minus_1;
+    sps->frame_mbs_only_flag = frame_mbs_only_flag;
+    sps->mb_adaptive_frame_field_flag = mb_adaptive_frame_field_flag;
+    sps->direct_8x8_inference_flag = direct_8x8_inference_flag;
+    sps->frame_cropping_flag = frame_cropping_flag;
+    sps->frame_crop_left_offset = frame_crop_left_offset;
+    sps->frame_crop_right_offset = frame_crop_right_offset;
+    sps->frame_crop_top_offset = frame_crop_top_offset;
+    sps->frame_crop_bottom_offset = frame_crop_bottom_offset;
+    sps->vui_para_present_flag = vui_para_present_flag;
+  } else if (nal_unit_type == 0x8) {
+    unsigned char pic_para_set_id;
+    unsigned char seq_para_set_id;
     unsigned char entropy_coding_mode_flag;
     unsigned char pic_order_present_flag;
-    unsigned int num_slice_groups_minus1;
-    unsigned int num_ref_idx_10_active_minus1;
-    unsigned int num_ref_idx_11_active_minus1;
+    unsigned char num_slice_groups_minus1;
+    unsigned char num_ref_idx_10_active_minus1;
+    unsigned char num_ref_idx_11_active_minus1;
     unsigned char weighted_pred_flag;
-    unsigned int weighted_bipred_idc;
-    unsigned int pic_init_qp_minus26;
-    unsigned int pic_init_qs_minus26;
-    unsigned int chroma_qp_index_offset;
+    unsigned char weighted_bipred_idc;
+    unsigned char pic_init_qp_minus26;
+    unsigned char pic_init_qs_minus26;
+    unsigned char chroma_qp_index_offset;
     unsigned char deblocking_filter_control_present_flag;
     unsigned char constrained_intra_pred_flag;
     unsigned char redundant_pic_cnt_present_flag;
+    struct pps * pps;
 
     if ((ret = init_bits(&bits, rbsp, rbsp_size)) != 0 ||
-        (ret = read_code(&pic_para_set_id, &bits)) != 0 ||
-        (ret = read_code(&seq_para_set_id, &bits)) != 0 ||
+        (ret = read_code_8(&pic_para_set_id, &bits)) != 0 ||
+        (ret = read_code_8(&seq_para_set_id, &bits)) != 0 ||
         (ret = read_bit(&entropy_coding_mode_flag, &bits)) != 0 ||
         (ret = read_bit(&pic_order_present_flag, &bits)) != 0 ||
-        (ret = read_code(&num_slice_groups_minus1, &bits)) != 0)
+        (ret = read_code_8(&num_slice_groups_minus1, &bits)) != 0)
       goto free;
 
     ATTR_U(pic_para_set_id);
@@ -1583,13 +1779,13 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
       goto free;
     }
 
-    if ((ret = read_code(&num_ref_idx_10_active_minus1, &bits)) != 0 ||
-        (ret = read_code(&num_ref_idx_11_active_minus1, &bits)) != 0 ||
+    if ((ret = read_code_8(&num_ref_idx_10_active_minus1, &bits)) != 0 ||
+        (ret = read_code_8(&num_ref_idx_11_active_minus1, &bits)) != 0 ||
         (ret = read_bit(&weighted_pred_flag, &bits)) != 0 ||
-        (ret = read_bits(&weighted_bipred_idc, 2, &bits)) != 0 ||
-        (ret = read_code(&pic_init_qp_minus26, &bits)) != 0 ||
-        (ret = read_code(&pic_init_qs_minus26, &bits)) != 0 ||
-        (ret = read_code(&chroma_qp_index_offset, &bits)) != 0 ||
+        (ret = read_bits_8(&weighted_bipred_idc, 2, &bits)) != 0 ||
+        (ret = read_code_8(&pic_init_qp_minus26, &bits)) != 0 ||
+        (ret = read_code_8(&pic_init_qs_minus26, &bits)) != 0 ||
+        (ret = read_code_8(&chroma_qp_index_offset, &bits)) != 0 ||
         (ret = read_bit(&deblocking_filter_control_present_flag, &bits)) != 0 ||
         (ret = read_bit(&constrained_intra_pred_flag, &bits)) != 0 ||
         (ret = read_bit(&redundant_pic_cnt_present_flag, &bits)) != 0)
@@ -1605,6 +1801,26 @@ read_nalu(unsigned int size /* size of NALU */, FILE * file) {
     ATTR_U(deblocking_filter_control_present_flag);
     ATTR_U(constrained_intra_pred_flag);
     ATTR_U(redundant_pic_cnt_present_flag);
+
+    pps = ret_nalu.pps;
+    pps->nal_ref_idc = nal_ref_idc;
+    pps->nal_unit_type = nal_unit_type;
+    pps->pic_para_set_id = pic_para_set_id;
+    pps->seq_para_set_id = seq_para_set_id;
+    pps->entropy_coding_mode_flag = entropy_coding_mode_flag;
+    pps->pic_order_present_flag = pic_order_present_flag;
+    pps->num_slice_groups_minus1 = num_slice_groups_minus1;
+    pps->num_ref_idx_10_active_minus1 = num_ref_idx_10_active_minus1;
+    pps->num_ref_idx_11_active_minus1 = num_ref_idx_11_active_minus1;
+    pps->weighted_pred_flag = weighted_pred_flag;
+    pps->weighted_bipred_idc = weighted_bipred_idc;
+    pps->pic_init_qp_minus26 = pic_init_qp_minus26;
+    pps->pic_init_qs_minus26 = pic_init_qs_minus26;
+    pps->chroma_qp_index_offset = chroma_qp_index_offset;
+    pps->deblocking_filter_control_present_flag =
+        deblocking_filter_control_present_flag;
+    pps->constrained_intra_pred_flag = constrained_intra_pred_flag;
+    pps->redundant_pic_cnt_present_flag = redundant_pic_cnt_present_flag;
   } else {
     ret = ERR_UNK_NAL_UNIT_TYPE;
     goto exit;
@@ -1624,6 +1840,9 @@ read_avcc(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char c_set0_flag; /* constraint set 0 flag */
   unsigned char c_set1_flag; /* constraint set 1 flag */
   unsigned char c_set2_flag; /* constraint set 2 flag */
+  unsigned char c_set3_flag; /* constraint set 3 flag */
+  unsigned char c_set4_flag; /* constraint set 4 flag */
+  unsigned char c_set5_flag; /* constraint set 5 flag */
   unsigned char level_idc; /* AVC level indication */
   unsigned char len_size_minus_one; /* NALU length size - 1 */
 
@@ -1644,11 +1863,14 @@ read_avcc(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char * sps_ext_nalu; /* sequence parameter set ext NALU */
 #endif
 
+  struct box_avcc * avcc;
+  struct sps * sps;
+  struct pps * pps;
+  union nalu nalu;
   unsigned int i;
   int ret;
 
   (void) info;
-  (void) p_box;
 
   ret = 0;
 
@@ -1663,6 +1885,9 @@ read_avcc(FILE * file, struct box_info * info, box_t p_box) {
   c_set0_flag = (unsigned char) ((profile_comp >> 7) & 0x1);
   c_set1_flag = (unsigned char) ((profile_comp >> 6) & 0x1);
   c_set2_flag = (unsigned char) ((profile_comp >> 5) & 0x1);
+  c_set3_flag = (unsigned char) ((profile_comp >> 4) & 0x1);
+  c_set4_flag = (unsigned char) ((profile_comp >> 3) & 0x1);
+  c_set5_flag = (unsigned char) ((profile_comp >> 2) & 0x1);
   len_size_minus_one = (unsigned char) (len_size_minus_one & 0x3);
   num_of_sps = (unsigned char) (num_of_sps & 0x1f);
 
@@ -1671,45 +1896,92 @@ read_avcc(FILE * file, struct box_info * info, box_t p_box) {
   attr_u("constraint_set0_flag", c_set0_flag);
   attr_u("constraint_set1_flag", c_set1_flag);
   attr_u("constraint_set2_flag", c_set2_flag);
+  attr_u("constraint_set3_flag", c_set3_flag);
+  attr_u("constraint_set4_flag", c_set4_flag);
+  attr_u("constraint_set5_flag", c_set5_flag);
   ATTR_U(level_idc);
   ATTR_U(len_size_minus_one);
   ATTR_U(num_of_sps);
 
-  indent(1);
-  for (i = 0; i < num_of_sps; i++) {
-    if ((ret = read_u16(&sps_len, file)) != 0)
-      goto exit;
+  sps = NULL;
+  pps = NULL;
 
-    ATTR_U(sps_len);
+  if (num_of_sps) {
 
-    if ((ret = read_nalu(sps_len, file)) != 0)
-      goto exit;
+    if ((ret = mem_alloc(&sps, num_of_sps * sizeof(* sps))) != 0)
+      goto free;
+
+    nalu.sps = sps;
+
+    indent(1);
+    for (i = 0; i < num_of_sps; i++) {
+      if ((ret = read_u16(&sps_len, file)) != 0)
+        goto free;
+
+      ATTR_U(sps_len);
+
+      nalu.sps = &sps[i];
+
+      if ((ret = read_nalu(nalu, sps_len, file)) != 0)
+        goto free;
+    }
+    indent(-1);
   }
-  indent(-1);
 
   if ((ret = read_u8(&num_of_pps, file)) != 0)
-    goto exit;
+    goto free;
 
   ATTR_U(num_of_pps);
 
-  indent(1);
-  for (i = 0; i < num_of_sps; i++) {
-    if ((ret = read_u16(&pps_len, file)) != 0)
-      goto exit;
+  pps = NULL;
 
-    ATTR_U(pps_len);
+  if (num_of_pps) {
 
-    if ((ret = read_nalu(pps_len, file)) != 0)
-      goto exit;
+    if ((ret = mem_alloc(&pps, num_of_pps * sizeof(* pps))) != 0)
+      goto free;
+
+    indent(1);
+    for (i = 0; i < num_of_sps; i++) {
+      if ((ret = read_u16(&pps_len, file)) != 0)
+        goto free;
+
+      ATTR_U(pps_len);
+
+      nalu.pps = &pps[i];
+
+      if ((ret = read_nalu(nalu, pps_len, file)) != 0)
+        goto free;
+    }
+    indent(-1);
   }
-  indent(-1);
 
   if (profile_idc == 100 ||
       profile_idc == 110 ||
       profile_idc == 122 ||
       profile_idc == 144) {
     ret = ERR_UNK_PROFILE_IDC;
-    goto exit;
+    goto free;
+  }
+
+  avcc = &p_box.vide->avcc;
+  avcc->conf_version = conf_version;
+  avcc->profile_idc = profile_idc;
+  avcc->c_set0_flag = c_set0_flag;
+  avcc->c_set1_flag = c_set1_flag;
+  avcc->c_set2_flag = c_set2_flag;
+  avcc->c_set3_flag = c_set3_flag;
+  avcc->c_set4_flag = c_set4_flag;
+  avcc->c_set5_flag = c_set5_flag;
+  avcc->level_idc = level_idc;
+  avcc->len_size_minus_one = len_size_minus_one;
+  avcc->num_of_sps = num_of_sps;
+  avcc->num_of_pps = num_of_pps;
+  avcc->sps.sps = sps;
+  avcc->pps.pps = pps;
+free:
+  if (ret) {
+    mem_free(sps);
+    mem_free(pps);
   }
 exit:
   return ret;
@@ -1776,9 +2048,16 @@ read_vide(FILE * file, struct box_info * info, box_t p_box) {
   ATTR_STR(compressorname);
   ATTR_U(depth);
 
+  vide->avcc.conf_version = 0;
+
   box.vide = vide;
   if ((ret = read_box(file, info, box, funcs)) != 0)
     goto exit;
+
+  if (vide->avcc.conf_version == 0) {
+    ret = ERR_NO_AVCC;
+    goto exit;
+  }
 
   vide->dref_index = dref_index;
   vide->width = width;
@@ -1796,7 +2075,8 @@ exit:
 
 static void
 free_vide(struct box_vide * vide) {
-  (void) vide;
+  mem_free(vide->avcc.sps.sps);
+  mem_free(vide->avcc.pps.pps);
 }
 
 static int
