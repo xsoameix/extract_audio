@@ -26,6 +26,7 @@ enum {
   ERR_EMPTY_BITS,
   ERR_ENTRY_COUNT,
   ERR_NO_AVCC,
+  ERR_UNK_CODEC,
   ERR_LEN
 };
 
@@ -278,11 +279,45 @@ struct box_vide {
   struct box_avcc avcc;
 };
 
+struct audio_specific_config {
+  unsigned int tag_len;
+  unsigned char audio_object_type;
+  unsigned char sampling_frequency_index;
+  unsigned int sampling_frequency;
+  unsigned char channel_configuration;
+};
+
+struct decoder_config_descr {
+  unsigned char object_type_idc;
+  unsigned char stream_type;
+  unsigned char up_stream;
+  unsigned int buffer_size_db;
+  unsigned int max_bitrate;
+  unsigned int avg_bitrate;
+  struct audio_specific_config audio;
+};
+
+struct sl_config_descr {
+  unsigned char predefined;
+};
+
+struct es_descr {
+  unsigned short es_id;
+  unsigned char es_flags;
+  struct decoder_config_descr dec_conf;
+  struct sl_config_descr sl_conf;
+};
+
+struct box_esds {
+  struct es_descr es;
+};
+
 struct box_soun {
   unsigned short dref_index;
   unsigned short channelcount;
   unsigned short samplesize;
   unsigned int samplerate;
+  struct box_esds esds;
 };
 
 struct box_stsd {
@@ -371,7 +406,8 @@ err_to_str(int i) {
     "Unknown object type indication",
     "entry_count do not match",
     "Empty bits",
-    "no avcc"
+    "no avcc",
+    "Unknown codec"
   };
   if (i < 0 || i >= ERR_LEN)
     return NULL;
@@ -2105,7 +2141,7 @@ read_tag(unsigned char * ret_tag, unsigned int * ret_len, FILE * file) {
 }
 
 static int
-read_id(unsigned char * ret_codec, FILE * file) {
+id_to_codec(unsigned char * ret_codec, unsigned char id) {
   struct pair {
     unsigned char id;
     unsigned char codec;
@@ -2113,14 +2149,7 @@ read_id(unsigned char * ret_codec, FILE * file) {
   struct pair pairs[] = {
     {0x40, CODEC_AAC} /* Audio ISO/IEC 14496-3 */
   };
-  unsigned char id;
   unsigned int i;
-  int ret;
-
-  if ((ret = read_u8(&id, file)) != 0)
-    return ret;
-
-  attr_u("object_type_idc", id);
 
   for (i = 0; i < sizeof(pairs)/sizeof(pairs[0]); i++)
     if (pairs[i].id == id) {
@@ -2140,6 +2169,7 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
   unsigned short es_id;
   unsigned char es_flags;
 
+  unsigned char object_type_idc;
   unsigned char codec;
   unsigned char stream_type;
   unsigned char up_stream;
@@ -2150,17 +2180,22 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char * bytes;
   struct bits bits;
 
-  unsigned int audio_object_type;
-  unsigned int sampling_frequency_index;
+  unsigned int audio_tag_len;
+  unsigned char audio_object_type;
+  unsigned char sampling_frequency_index;
   unsigned int sampling_frequency;
-  unsigned int channel_configuration;
+  unsigned char channel_configuration;
 
   unsigned char predefined;
 
+  struct box_esds * esds;
+  struct es_descr * es;
+  struct decoder_config_descr * dec;
+  struct sl_config_descr * sl;
+  struct audio_specific_config * audio;
   int ret;
 
   (void) info;
-  (void) p_box;
 
   ret = 0;
 
@@ -2193,7 +2228,8 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
   indent(0); printf("[DecoderConfigDescr %u]\n", tag_len);
   indent(1);
 
-  if ((ret = read_id(&codec, file)) != 0 ||
+  if ((ret = read_u8(&object_type_idc, file)) != 0 ||
+      (ret = id_to_codec(&codec, object_type_idc)) != 0 ||
       (ret = read_u32(&buffer_size_db, file)) != 0 ||
       (ret = read_u32(&max_bitrate, file)) != 0 ||
       (ret = read_u32(&avg_bitrate, file)) != 0 ||
@@ -2204,6 +2240,7 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
   up_stream = (buffer_size_db >> 25) & 0x1;
   buffer_size_db = buffer_size_db & 0xffffff; 
 
+  ATTR_U(object_type_idc);
   ATTR_U(stream_type);
   ATTR_U(up_stream);
   ATTR_U(buffer_size_db);
@@ -2214,7 +2251,9 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
       tag_len == 0)
     return ERR_UNK_TAG;
 
-  indent(0); printf("[DecSpecificInfo %u]\n", tag_len);
+  audio_tag_len = tag_len;
+
+  indent(0); printf("[AudioSpecificConfig %u]\n", tag_len);
   indent(1);
 
   if (codec == CODEC_AAC) {
@@ -2224,18 +2263,18 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
 
     if ((ret = read_ary(bytes, tag_len, 1, file)) != 0 ||
         (ret = init_bits(&bits, bytes, tag_len)) != 0 ||
-        (ret = read_bits(&audio_object_type, 5, &bits)) != 0)
+        (ret = read_bits_8(&audio_object_type, 5, &bits)) != 0)
       goto free;
 
     if (audio_object_type == 0x1f) {
-      if ((ret = read_bits(&audio_object_type, 6, &bits)) != 0)
+      if ((ret = read_bits_8(&audio_object_type, 6, &bits)) != 0)
         goto free;
-      audio_object_type += 0x20;
+      audio_object_type = (unsigned char) (audio_object_type + 0x20);
     }
 
     ATTR_U(audio_object_type);
 
-    if ((ret = read_bits(&sampling_frequency_index, 4, &bits)) != 0)
+    if ((ret = read_bits_8(&sampling_frequency_index, 4, &bits)) != 0)
       goto free;
 
     ATTR_U(sampling_frequency_index);
@@ -2249,12 +2288,16 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
       sampling_frequency = 0;
     }
 
-    if ((ret = read_bits(&channel_configuration, 4, &bits)) != 0)
+    if ((ret = read_bits_8(&channel_configuration, 4, &bits)) != 0)
       goto free;
 
     ATTR_U(channel_configuration);
 free:
     mem_free(bytes);
+    if (ret)
+      return ret;
+  } else {
+    return ERR_UNK_CODEC;
   }
 
   indent(-2);
@@ -2274,6 +2317,30 @@ free:
   ATTR_U(predefined);
 
   indent(-2);
+
+  esds = &p_box.soun->esds;
+
+  es = &esds->es;
+  es->es_id = es_id;
+  es->es_flags = es_flags;;
+
+  dec = &es->dec_conf;
+  dec->object_type_idc = object_type_idc;
+  dec->stream_type = stream_type;
+  dec->up_stream = up_stream;
+  dec->buffer_size_db = buffer_size_db;
+  dec->max_bitrate = max_bitrate;
+  dec->avg_bitrate = avg_bitrate;
+
+  audio = &dec->audio;
+  audio->tag_len = audio_tag_len;
+  audio->audio_object_type = audio_object_type;
+  audio->sampling_frequency_index = sampling_frequency_index;
+  audio->sampling_frequency = sampling_frequency;
+  audio->channel_configuration = channel_configuration;
+
+  sl = &es->sl_conf;
+  sl->predefined = predefined;
 
   return ret;
 }
