@@ -31,6 +31,7 @@ enum {
   ERR_WRITE_BIT,
   ERR_WRITE_BITS,
   ERR_BOX_QTY,
+  ERR_NO_SOUN,
   ERR_LEN
 };
 
@@ -43,7 +44,8 @@ enum {
   TAG_ES_DESCR = 0x03,
   TAG_DECODER_CONFIG_DESCR,
   TAG_DEC_SPECIFIC_INFO,
-  TAG_SL_CONFIG_DESCR
+  TAG_SL_CONFIG_DESCR,
+  TAG_MP4_IOD = 0x10
 };
 
 enum {
@@ -62,11 +64,15 @@ enum {
 enum {
   BOX_NIL  = MKBOX(' ', ' ', ' ', ' '),
   BOX_TOP  = MKBOX('t', 'o', 'p', ' '),
+  BOX_UDTA = MKBOX('u', 'd', 't', 'a'),
   BOX_FTYP = MKBOX('f', 't', 'y', 'p'),
   BOX_MOOV = MKBOX('m', 'o', 'o', 'v'),
   BOX_MVHD = MKBOX('m', 'v', 'h', 'd'),
+  BOX_IODS = MKBOX('i', 'o', 'd', 's'),
   BOX_TRAK = MKBOX('t', 'r', 'a', 'k'),
   BOX_TKHD = MKBOX('t', 'k', 'h', 'd'),
+  BOX_EDTS = MKBOX('e', 'd', 't', 's'),
+  BOX_ELST = MKBOX('e', 'l', 's', 't'),
   BOX_MDIA = MKBOX('m', 'd', 'i', 'a'),
   BOX_MDHD = MKBOX('m', 'd', 'h', 'd'),
   BOX_HDLR = MKBOX('h', 'd', 'l', 'r'),
@@ -88,9 +94,12 @@ enum {
   BOX_STCO = MKBOX('s', 't', 'c', 'o'),
   BOX_STSZ = MKBOX('s', 't', 's', 'z'),
   BOX_STSS = MKBOX('s', 't', 's', 's'),
+  BOX_SGPD = MKBOX('s', 'g', 'p', 'd'),
+  BOX_SBGP = MKBOX('s', 'b', 'g', 'p'),
   BOX_VMHD = MKBOX('v', 'm', 'h', 'd'),
   BOX_SMHD = MKBOX('s', 'm', 'h', 'd'),
-  BOX_MDAT = MKBOX('m', 'd', 'a', 't')
+  BOX_MDAT = MKBOX('m', 'd', 'a', 't'),
+  BOX_FREE = MKBOX('f', 'r', 'e', 'e')
 };
 
 union box {
@@ -129,6 +138,21 @@ struct box_mvhd {
   short _;
   int matrix[9];
   unsigned int next_track_id;
+};
+
+struct initial_object_descr {
+  unsigned short object_descr_id;
+  unsigned char url_flag;
+  unsigned char include_inline_profile_level_flag;
+  unsigned char od_profile_level_idc;
+  unsigned char scene_profile_level_idc;
+  unsigned char audio_profile_level_idc;
+  unsigned char visual_profile_level_idc;
+  unsigned char graphics_profile_levvel_idc;
+};
+
+struct box_iods {
+  struct initial_object_descr iod;
 };
 
 struct box_tkhd {
@@ -369,14 +393,17 @@ struct box_stsc {
 
 struct stco_entry {
   unsigned int chunk_offset;
+  unsigned int samples_per_chunk; /* created from stsc_entry */
 };
 
 struct box_stco {
   unsigned int entry_count;
+  long pos;
   struct stco_entry * entry;
 };
 
 struct stsz_entry {
+  unsigned int pos;
   unsigned int entry_size;
 };
 
@@ -432,13 +459,19 @@ struct box_trak {
 
 struct box_moov {
   struct box_mvhd mvhd;
+  struct box_iods * iods;
   struct box_trak * trak;
   unsigned int trak_len;
+};
+
+struct box_mdat {
+  FILE * file;
 };
 
 struct box_top {
   struct box_ftyp ftyp;
   struct box_moov moov;
+  struct box_mdat mdat;
 };
 
 struct box_info {
@@ -493,12 +526,13 @@ err_to_str(int i) {
     "Unknown object type indication",
     "entry_count do not match",
     "Empty bits",
-    "no avcc",
+    "No avcc",
     "Unknown codec",
     "Illegal string length",
     "Unable to write bit",
     "Unable to write bits",
-    "Illegal quantity of box"
+    "Illegal quantity of box",
+    "No sound track"
   };
   if (i < 0 || i >= ERR_LEN)
     return NULL;
@@ -791,6 +825,31 @@ read_ver(unsigned char * version, unsigned int * flags, FILE * file) {
 }
 
 static int
+read_tag(unsigned char * ret_tag, unsigned int * ret_len, FILE * file) {
+  unsigned char tag;
+  unsigned int len;
+  unsigned char c;
+  int i;
+  int ret;
+
+  if ((ret = read_u8(&tag, file)) != 0)
+    return ret;
+
+  len = 0;
+  for (i = 0; i < 4; i++) {
+    if ((ret = read_u8(&c, file)) != 0)
+      return ret;
+    len <<= 7;
+    len |= c & 0x7f;
+    if ((c & 0x80) == 0)
+      break;
+  }
+  * ret_len = len;
+  * ret_tag = tag;
+  return 0;
+}
+
+static int
 read_mat(int * matrix, FILE * file) {
   int i;
   int ret;
@@ -849,6 +908,97 @@ read_box(FILE * file, struct box_info * info, box_t box,
       if (funcs[i].count == 0)
         return ERR_BOX_QTY;
 
+  return 0;
+}
+
+static int
+read_iods(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned char tag;
+  unsigned int tag_len;
+  unsigned short object_descr_id;
+  unsigned char url_flag;
+  unsigned char include_inline_profile_level_flag;
+  unsigned char od_profile_level_idc;
+  unsigned char scene_profile_level_idc;
+  unsigned char audio_profile_level_idc;
+  unsigned char visual_profile_level_idc;
+  unsigned char graphics_profile_levvel_idc;
+  struct box_iods * iods;
+  struct initial_object_descr * iod;
+  int ret;
+
+  (void) info;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_tag(&tag, &tag_len, file)) != 0)
+    return ret;
+
+  if (tag != TAG_MP4_IOD)
+    return ERR_UNK_TAG;
+
+  indent(0); printf("[InitialObjectDescr %u]\n", tag_len);
+  indent(1);
+
+  if ((ret = read_u16(&object_descr_id, file)) != 0)
+    return ret;
+
+  url_flag = (unsigned char) ((object_descr_id >> 5) & 0x1);
+  include_inline_profile_level_flag =
+      (unsigned char) ((object_descr_id >> 4) & 0x1);
+  object_descr_id >>= 6;
+
+  ATTR_U(object_descr_id);
+  ATTR_U(url_flag);
+  ATTR_U(include_inline_profile_level_flag);
+
+  if (url_flag == 0) {
+    if ((ret = read_u8(&od_profile_level_idc, file)) != 0 ||
+        (ret = read_u8(&scene_profile_level_idc, file)) != 0 ||
+        (ret = read_u8(&audio_profile_level_idc, file)) != 0 ||
+        (ret = read_u8(&visual_profile_level_idc, file)) != 0 ||
+        (ret = read_u8(&graphics_profile_levvel_idc, file)) != 0)
+      return ret;
+
+    ATTR_U(od_profile_level_idc);
+    ATTR_U(scene_profile_level_idc);
+    ATTR_U(audio_profile_level_idc);
+    ATTR_U(visual_profile_level_idc);
+    ATTR_U(graphics_profile_levvel_idc);
+  }
+
+  if ((ret = mem_alloc(&iods, sizeof(* iods))) != 0)
+    return ret;
+
+  iod = &iods->iod;
+  iod->object_descr_id = object_descr_id;
+  iod->url_flag = url_flag;
+  iod->include_inline_profile_level_flag = include_inline_profile_level_flag;
+  if (url_flag == 0) {
+    iod->od_profile_level_idc = od_profile_level_idc;
+    iod->scene_profile_level_idc = scene_profile_level_idc;
+    iod->audio_profile_level_idc = audio_profile_level_idc;
+    iod->visual_profile_level_idc = visual_profile_level_idc;
+    iod->graphics_profile_levvel_idc = graphics_profile_levvel_idc;
+  }
+
+  p_box.moov->iods = iods;
+
+  indent(-1);
+  return 0;
+}
+
+static int
+read_udta(FILE * file, struct box_info * info, box_t p_box) {
+  long pos;
+  int ret;
+
+  (void) p_box;
+
+  if ((ret = get_pos(&pos, file)) != 0 ||
+      (ret = skip(file, info->size - (unsigned int) (pos - info->pos))) != 0)
+    return ret;
   return 0;
 }
 
@@ -1048,6 +1198,51 @@ read_tkhd(FILE * file, struct box_info * info, box_t p_box) {
   tkhd->height = height;
 
   return 0;
+}
+
+static int
+read_elst(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int entry_count;
+  unsigned int segment_duration;
+  int media_time;
+  short media_rate_integer;
+  short media_rate_fraction;
+  unsigned int i;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u32(&entry_count, file)) != 0)
+    return ret;
+
+  ATTR_U(entry_count);
+
+  for (i = 0; i < entry_count; i++) {
+    if ((ret = read_u32(&segment_duration, file)) != 0 ||
+        (ret = read_s32(&media_time, file)) != 0 ||
+        (ret = read_s16(&media_rate_integer, file)) != 0 ||
+        (ret = read_s16(&media_rate_fraction, file)) != 0)
+      return ret;
+
+    ATTR_U(segment_duration);
+    ATTR_S(media_time);
+    ATTR_S(media_rate_integer);
+    ATTR_S(media_rate_fraction);
+  }
+  return 0;
+}
+
+static int
+read_edts(FILE * file, struct box_info * info, box_t p_box) {
+  struct box_func funcs[] = {
+    {BOX_ELST, 0, BOX_QTY_0_OR_1, read_elst},
+    {0, 0, 0, NULL}
+  };
+  return read_box(file, info, p_box, funcs);
 }
 
 static int
@@ -1669,7 +1864,7 @@ read_vui_para(struct vui * vui, struct bits * bits) {
   vui->video_signal_type_present_flag = video_signal_type_present_flag;
   if (video_signal_type_present_flag) {
     vui->video_format = video_format;
-    vui->video_full_range_flag = video_format;
+    vui->video_full_range_flag = video_full_range_flag;
 
     vui->colour_description_present_flag = colour_description_present_flag;
     if (colour_description_present_flag) {
@@ -2085,7 +2280,7 @@ read_avcc(FILE * file, struct box_info * info, box_t p_box) {
       goto free;
 
     indent(1);
-    for (i = 0; i < num_of_sps; i++) {
+    for (i = 0; i < num_of_pps; i++) {
       if ((ret = read_u16(&pps_len, file)) != 0)
         goto free;
 
@@ -2228,31 +2423,6 @@ free:
     free_vide(vide);
 exit:
   return ret;
-}
-
-static int
-read_tag(unsigned char * ret_tag, unsigned int * ret_len, FILE * file) {
-  unsigned char tag;
-  unsigned int len;
-  unsigned char c;
-  int i;
-  int ret;
-
-  if ((ret = read_u8(&tag, file)) != 0)
-    return ret;
-
-  len = 0;
-  for (i = 0; i < 4; i++) {
-    if ((ret = read_u8(&c, file)) != 0)
-      return ret;
-    len <<= 7;
-    len |= c & 0x7f;
-    if ((c & 0x80) == 0)
-      break;
-  }
-  * ret_len = len;
-  * ret_tag = tag;
-  return 0;
 }
 
 static int
@@ -2771,7 +2941,12 @@ read_stsz(FILE * file, struct box_info * info, box_t p_box) {
       }
     }
   } else {
-    entry = NULL;
+
+    if ((ret = mem_alloc(&entry, sample_count * sizeof(* entry))) != 0)
+      goto exit;
+
+    for (i = 0; i < sample_count; i++)
+      entry[i].entry_size = sample_size;
   }
   stsz = &p_box.mdia->minf.stbl.stsz;
   stsz->sample_size = sample_size;
@@ -2831,6 +3006,83 @@ exit:
 }
 
 static int
+read_sgpd(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int grouping_type;
+  unsigned int default_length;
+  unsigned int entry_count;
+  short roll_distance;
+  unsigned int i;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u32(&grouping_type, file)) != 0)
+    return ret;
+
+  attr_c32("grouping_type", box_to_str(grouping_type));
+
+  if (version == 1) {
+    if ((ret = read_u32(&default_length, file)) != 0)
+      return ret;
+
+    ATTR_U(default_length);
+  }
+
+  if ((ret = read_u32(&entry_count, file)) != 0)
+    return ret;
+
+  ATTR_U(entry_count);
+
+  for (i = 0; i < entry_count; i++) {
+    if ((ret = read_s16(&roll_distance, file)) != 0)
+      return ret;
+
+    ATTR_S(roll_distance);
+  }
+  return 0;
+}
+
+static int
+read_sbgp(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int grouping_type;
+  unsigned int entry_count;
+  unsigned int sample_count;
+  unsigned int group_desc_index;
+  unsigned int i;
+  int ret;
+
+  (void) info;
+  (void) p_box;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u32(&grouping_type, file)) != 0)
+    return ret;
+
+  attr_c32("grouping_type", box_to_str(grouping_type));
+
+  if ((ret = read_u32(&entry_count, file)) != 0)
+    return ret;
+
+  ATTR_U(entry_count);
+
+  for (i = 0; i < entry_count; i++) {
+    if ((ret = read_u32(&sample_count, file)) != 0 ||
+        (ret = read_u32(&group_desc_index, file)) != 0)
+      return ret;
+
+    ATTR_U(sample_count);
+    ATTR_U(group_desc_index);
+  }
+  return 0;
+}
+
+static int
 read_stbl(FILE * file, struct box_info * info, box_t p_box) {
   struct box_func funcs[] = {
     {BOX_STSD, 0, BOX_QTY_1,      read_stsd},
@@ -2839,6 +3091,8 @@ read_stbl(FILE * file, struct box_info * info, box_t p_box) {
     {BOX_STCO, 0, BOX_QTY_1,      read_stco},
     {BOX_STSZ, 0, BOX_QTY_1,      read_stsz},
     {BOX_STSS, 0, BOX_QTY_0_OR_1, read_stss},
+    {BOX_SGPD, 0, BOX_QTY_0_TO_N, read_sgpd},
+    {BOX_SBGP, 0, BOX_QTY_0_TO_N, read_sbgp},
     {0, 0, 0, NULL}
   };
   return read_box(file, info, p_box, funcs);
@@ -2996,8 +3250,9 @@ free_trak(struct box_trak * trak) {
 static int
 read_trak(FILE * file, struct box_info * info, box_t p_box) {
   struct box_func funcs[] = {
-    {BOX_TKHD, 0, BOX_QTY_1, read_tkhd},
-    {BOX_MDIA, 0, BOX_QTY_1, read_mdia},
+    {BOX_TKHD, 0, BOX_QTY_1,      read_tkhd},
+    {BOX_EDTS, 0, BOX_QTY_0_OR_1, read_edts},
+    {BOX_MDIA, 0, BOX_QTY_1,      read_mdia},
     {0, 0, 0, NULL}
   };
   struct box_moov * moov;
@@ -3032,6 +3287,8 @@ read_moov(FILE * file, struct box_info * info, box_t p_box) {
   struct box_func funcs[] = {
     {BOX_MVHD, 0, BOX_QTY_1,      read_mvhd},
     {BOX_TRAK, 0, BOX_QTY_1_TO_N, read_trak},
+    {BOX_IODS, 0, BOX_QTY_0_OR_1, read_iods},
+    {BOX_UDTA, 0, BOX_QTY_0_TO_N, read_udta},
     {0, 0, 0, NULL}
   };
   box_t box;
@@ -3044,79 +3301,141 @@ read_mdat(FILE * file, struct box_info * info, box_t p_box) {
   long pos;
   int ret;
 
-  (void) p_box;
-
-  if ((ret = get_pos(&pos, file)) != 0)
+  if ((ret = get_pos(&pos, file)) != 0 ||
+      (ret = skip(file, info->size - (unsigned int) (pos - info->pos))) != 0)
     return ret;
 
-  return skip(file, info->size - (unsigned int) (pos - info->pos));
+  p_box.top->mdat.file = file;
+  return 0;
 }
 
 static int
-read_file(FILE * file, struct box_info * info, struct box_top * top) {
-  box_t box;
+read_free(FILE * file, struct box_info * info, box_t p_box) {
+  long pos;
+  int ret;
+
+  (void) p_box;
+
+  if ((ret = get_pos(&pos, file)) != 0 ||
+      (ret = skip(file, info->size - (unsigned int) (pos - info->pos))) != 0)
+    return ret;
+  return 0;
+}
+
+static int
+fill_stbl(struct box_top * top) {
+  struct box_moov * moov;
+  struct box_stbl * stbl;
+  struct box_stco * stco;
+  struct box_stsc * stsc;
+  struct box_stsz * stsz;
+  unsigned int i;
+  unsigned int j;
+  unsigned int o; /* stco->entry[o] */
+  unsigned int c; /* stsc->entry[c], index of chunk */
+  unsigned int z; /* stsz->entry[z], index of sample */
+  unsigned int first_chunk;
+  unsigned int sample_offset;
+
+  moov = &top->moov;
+
+  for (i = 0; i < moov->trak_len; i++) {
+    stbl = &moov->trak[i].mdia.minf.stbl;
+    stco = &stbl->stco;
+    stsc = &stbl->stsc;
+    stsz = &stbl->stsz;
+    first_chunk = stco->entry_count;
+    z = stsz->sample_count;
+
+    /* iterate each stsc entry reversely */
+    for (c = stsc->entry_count; c--;) {
+
+      /* iterate each chunk reversely */
+      for (o = first_chunk; o-- > stsc->entry[c].first_chunk-1;) {
+
+        sample_offset = stco->entry[o].chunk_offset;
+        z -= stsc->entry[c].samples_per_chunk;
+
+        /* iterate each sample */
+        for (j = 0; j < stsc->entry[c].samples_per_chunk; j++) {
+          stsz->entry[z+j].pos = sample_offset; /* set sample's pos */
+          sample_offset += stsz->entry[z+j].entry_size;
+        }
+
+        /* set chunk's samples_per_chunk */
+        stco->entry[o].samples_per_chunk = stsc->entry[c].samples_per_chunk;
+      }
+      first_chunk = stsc->entry[c].first_chunk-1;
+    }
+  }
+  return 0;
+}
+
+static int
+read_top(FILE * file, struct box_top * top) {
+  struct box_info info;
   struct box_func funcs[] = {
-    {BOX_FTYP, 0, BOX_QTY_1, read_ftyp},
-    {BOX_MOOV, 0, BOX_QTY_1, read_moov},
-    {BOX_MDAT, 0, BOX_QTY_1, read_mdat},
+    {BOX_FTYP, 0, BOX_QTY_1,      read_ftyp},
+    {BOX_MOOV, 0, BOX_QTY_1,      read_moov},
+    {BOX_MDAT, 0, BOX_QTY_1,      read_mdat},
+    {BOX_FREE, 0, BOX_QTY_0_TO_N, read_free},
     {0, 0, 0, NULL}
   };
-  box.top = top;
-  return read_box(file, info, box, funcs);
-}
-
-static int
-open_file(FILE ** file_p, struct box_info * info,
-          struct box_top * top, const char * fname) {
-  FILE * file;
+  box_t box;
   long size;
   int ret;
 
-  file = fopen(fname, "rb");
-  if (file == NULL) {
-    ret = ERR_IO;
-    goto exit;
-  }
-
-  if (fseek(file, 0, SEEK_END) == -1) {
-    ret = ERR_IO;
-    goto close;
-  }
+  if (fseek(file, 0, SEEK_END) == -1)
+    return ERR_IO;
 
   if ((ret = get_pos(&size, file)) != 0)
-    goto close;
+    return ret;
 
-  if (fseek(file, 0, SEEK_SET) == -1) {
-    ret = ERR_IO;
-    goto close;
-  }
+  if (fseek(file, 0, SEEK_SET) == -1)
+    return ERR_IO;
 
-  info->pos = 0;
-  info->size = (unsigned int) size;
-  info->type = BOX_TOP;
+  info.pos = 0;
+  info.size = (unsigned int) size;
+  info.type = BOX_TOP;
 
   top->ftyp.c_brands = NULL;
+  top->moov.iods = NULL;
   top->moov.trak = NULL;
   top->moov.trak_len = 0;
 
-  * file_p = file;
-close:
-  if (ret)
-    fclose(file);
-exit:
-  return ret;
+  box.top = top;
+  if ((ret = read_box(file, &info, box, funcs)) != 0 ||
+      (ret = fill_stbl(top)) != 0)
+    return ret;
+  return 0;
 }
 
 static void
-close_file(FILE * file, struct box_top * top) {
+free_top(struct box_top * top) {
   unsigned int i;
 
   for (i = 0; i < top->moov.trak_len; i++)
     free_trak(&top->moov.trak[i]);
 
   mem_free(top->moov.trak);
+  mem_free(top->moov.iods);
   mem_free(top->ftyp.c_brands);
+}
 
+static int
+open_file(FILE ** file_p, const char * fname) {
+  FILE * file;
+
+  file = fopen(fname, "rb");
+  if (file == NULL)
+    return ERR_IO;
+
+  * file_p = file;
+  return 0;
+}
+
+static void
+close_file(FILE * file) {
   fclose(file);
 }
 
@@ -3211,6 +3530,40 @@ write_ver(unsigned char version, unsigned int flags, FILE * file) {
 }
 
 static int
+write_tag(unsigned char tag, unsigned int len, FILE * file) {
+  unsigned int m; /* mask */
+  unsigned int n; /* bit length of len */
+  unsigned int b; /* byte */
+  int ret;
+
+  if ((ret = write_u8(tag, file)) != 0)
+    return ret;
+
+  if (len == 0)
+    return write_u8(0, file);
+
+  n = 32;
+  m = 0x80000000;
+  while ((len & m) == 0) {
+    n--;
+    m >>= 1;
+  }
+  if (n % 7) {
+    n -= n % 7;
+    b = (len >> n) | (n ? 0x80 : 0);
+    if ((ret = write_u8((unsigned char) b, file)) != 0)
+      return ret;
+  }
+  while (n >= 7) {
+    n -= 7;
+    b = ((len >> n) & 0x7f) | (n ? 0x80 : 0);
+    if ((ret = write_u8((unsigned char) b, file)) != 0)
+      return ret;
+  }
+  return 0;
+}
+
+static int
 write_mat(int * matrix, FILE * file) {
   int i;
   int ret;
@@ -3277,6 +3630,47 @@ write_mvhd(FILE * file, box_t p_box) {
       (ret = write_mat(mvhd->matrix, file)) != 0 ||
       (ret = skip(file, 4 * 6)) != 0 || /* pre defined */
       (ret = write_u32(mvhd->next_track_id, file)) != 0)
+    return ret;
+  return 0;
+}
+
+static int
+write_iods(FILE * file, box_t p_box) {
+  unsigned short object_descr_id;
+  struct box_iods * iods;
+  struct initial_object_descr * iod;
+  long pos;
+  long now;
+  int ret;
+
+  iods = p_box.moov->iods;
+  iod = &iods->iod;
+  if ((ret = write_ver(0, 0, file)) != 0 ||
+      (ret = get_pos(&pos, file)) != 0 ||
+      (ret = skip(file, 2)) != 0)
+    return ret;
+
+  object_descr_id = (unsigned short)
+      ((iod->object_descr_id << 6) |
+       (iod->url_flag << 5) |
+       (iod->include_inline_profile_level_flag << 4) |
+       0x0f);
+  if ((ret = write_u16(object_descr_id, file)) != 0)
+    return ret;
+
+  if (iod->url_flag == 0) {
+    if ((ret = write_u8(iod->od_profile_level_idc, file)) != 0 ||
+        (ret = write_u8(iod->scene_profile_level_idc, file)) != 0 ||
+        (ret = write_u8(iod->audio_profile_level_idc, file)) != 0 ||
+        (ret = write_u8(iod->visual_profile_level_idc, file)) != 0 ||
+        (ret = write_u8(iod->graphics_profile_levvel_idc, file)) != 0)
+      return ret;
+  }
+  if ((ret = get_pos(&now, file)) != 0 ||
+      (ret = set_pos(pos, file)) != 0 ||
+      (ret = write_tag(TAG_MP4_IOD,
+                       (unsigned int) (now - pos - 2), file)) != 0 ||
+      (ret = set_pos(now, file)) != 0)
     return ret;
   return 0;
 }
@@ -3850,7 +4244,7 @@ free:
   nalu = bits.bytes;
   mem_free(nalu);
 exit:
-  return 0;
+  return ret;
 }
 
 static int
@@ -3921,40 +4315,6 @@ write_vide(FILE * file, box_t box) {
       (ret = write_s16((short) -1, file)) != 0 || /* pre defined */
       (ret = write_box(file, box, BOX_AVCC, write_avcc)) != 0)
     return ret;
-  return 0;
-}
-
-static int
-write_tag(unsigned char tag, unsigned int len, FILE * file) {
-  unsigned int m; /* mask */
-  unsigned int n; /* bit length of len */
-  unsigned int b; /* byte */
-  int ret;
-
-  if ((ret = write_u8(tag, file)) != 0)
-    return ret;
-
-  if (len == 0)
-    return write_u8(0, file);
-
-  n = 32;
-  m = 0x80000000;
-  while ((len & m) == 0) {
-    n--;
-    m >>= 1;
-  }
-  if (n % 7) {
-    n -= n % 7;
-    b = (len >> n) | (n ? 0x80 : 0);
-    if ((ret = write_u8((unsigned char) b, file)) != 0)
-      return ret;
-  }
-  while (n >= 7) {
-    n -= 7;
-    b = ((len >> n) & 0x7f) | (n ? 0x80 : 0);
-    if ((ret = write_u8((unsigned char) b, file)) != 0)
-      return ret;
-  }
   return 0;
 }
 
@@ -4164,17 +4524,14 @@ write_stsc(FILE * file, box_t p_box) {
 static int
 write_stco(FILE * file, box_t p_box) {
   struct box_stco * stco;
-  unsigned int i;
   int ret;
 
   stco = &p_box.mdia->minf.stbl.stco;
   if ((ret = write_ver(0, 0, file)) != 0 ||
-      (ret = write_u32(stco->entry_count, file)) != 0)
+      (ret = write_u32(stco->entry_count, file)) != 0 ||
+      (ret = get_pos(&stco->pos, file)) != 0 ||
+      (ret = skip(file, stco->entry_count * 4)) != 0)
     return ret;
-
-  for (i = 0; i < stco->entry_count; i++)
-    if ((ret = write_u32(stco->entry[i].chunk_offset, file)) != 0)
-      return ret;
   return 0;
 }
 
@@ -4323,17 +4680,125 @@ write_moov(FILE * file, box_t p_box) {
   if ((ret = write_box(file, box, BOX_MVHD, write_mvhd)) != 0)
     return ret;
 
+  if (moov->iods != NULL)
+    if ((ret = write_box(file, box, BOX_IODS, write_iods)) != 0)
+      return ret;
+
   for (i = 0; i < moov->trak_len; i++) {
     box.trak = &moov->trak[i];
     if ((ret = write_box(file, box, BOX_TRAK, write_trak)) != 0)
       return ret;
   }
-
   return 0;
 }
 
 static int
-write_file(struct box_top * top, const char * fname) {
+write_mdat(FILE * file, box_t p_box) {
+  struct box_moov * moov;
+  struct box_stbl * stbl;
+  struct box_stco * stco;
+  struct box_stsz * stsz;
+  unsigned int i;
+  unsigned int j;
+  unsigned int o; /* stco->entry[o], index of chunk */
+  unsigned int z; /* stsz->entry[z], index of sample */
+  unsigned int trak_count;
+  unsigned int sample_size;
+  unsigned int sample_capa;
+  unsigned char * sample;
+  unsigned int * sample_i; /* sample index for each track */
+  FILE * sample_file;
+  long pos;
+  int ret;
+
+  ret = 0;
+
+  moov = &p_box.top->moov;
+
+  trak_count = 0;
+
+  sample_capa = 1;
+  sample_file = p_box.top->mdat.file;
+
+  sample = NULL;
+  sample_i = NULL;
+
+  if ((ret = mem_alloc(&sample, sample_capa)) != 0 ||
+      (ret = mem_alloc(&sample_i, moov->trak_len * sizeof(sample_i))) != 0)
+    goto exit;
+
+  for (i = 0; i < moov->trak_len; i++)
+    sample_i[i] = 0;
+
+  /* iterate each chunk */
+  for (o = 0;; o++) {
+
+    /* iterate each track */
+    for (i = 0; i < moov->trak_len; i++) {
+
+      stbl = &moov->trak[i].mdia.minf.stbl;
+      stco = &stbl->stco;
+      stsz = &stbl->stsz;
+
+      if (o >= stco->entry_count) {
+        trak_count++;
+        break;
+      }
+
+      if ((ret = get_pos(&pos, file)) != 0)
+        goto exit;
+
+      stco->entry[o].chunk_offset = (unsigned int) pos; /* set chunk offset */
+
+      /* iterate each sample */
+      for (j = 0; j < stco->entry[o].samples_per_chunk; j++) {
+
+        z = sample_i[i]++;
+
+        sample_size = stsz->entry[z].entry_size;
+        while (sample_size > sample_capa) {
+          if ((ret = mem_realloc(&sample, sample_capa << 1)) != 0)
+            goto exit;
+          sample_capa <<= 1;
+        }
+
+        /* write sample */
+        if ((ret = set_pos(stsz->entry[z].pos, sample_file)) != 0 ||
+            (ret = read_ary(sample, sample_size, 1, sample_file)) != 0 ||
+            (ret = write_ary(sample, sample_size, 1, file)) != 0)
+          goto exit;
+      }
+    }
+
+    if (trak_count == moov->trak_len)
+      break;
+  }
+
+  /* iterate each track */
+  for (i = 0; i < moov->trak_len; i++) {
+
+    stco = &moov->trak[i].mdia.minf.stbl.stco;
+
+    if ((ret = get_pos(&pos, file)) != 0 ||
+        (ret = set_pos(stco->pos, file)) != 0)
+      goto exit;
+
+    /* write chunk offset */
+    for (j = 0; j < stco->entry_count; j++)
+      if ((ret = write_u32(stco->entry[j].chunk_offset, file)) != 0)
+        goto exit;
+
+    if ((ret = set_pos(pos, file)) != 0)
+      goto exit;
+  }
+exit:
+  mem_free(sample_i);
+  mem_free(sample);
+  return ret;
+}
+
+static int
+write_top(struct box_top * top, const char * fname) {
   FILE * file;
   box_t box;
   int ret;
@@ -4346,7 +4811,8 @@ write_file(struct box_top * top, const char * fname) {
 
   box.top = top;
   if ((ret = write_box(file, box, BOX_FTYP, write_ftyp)) != 0 ||
-      (ret = write_box(file, box, BOX_MOOV, write_moov)) != 0)
+      (ret = write_box(file, box, BOX_MOOV, write_moov)) != 0 ||
+      (ret = write_box(file, box, BOX_MDAT, write_mdat)) != 0)
     goto close;
 
 close:
@@ -4355,28 +4821,83 @@ exit:
   return ret;
 }
 
+static int
+extract_audio(struct box_top * top) {
+  struct box_moov * moov;
+  struct box_trak * trak;
+  unsigned int i;
+  unsigned int j;
+  int ret;
+
+  ret = 0;
+
+  moov = &top->moov;
+
+  for (i = 0; i < moov->trak_len; i++) {
+
+    if (moov->trak[i].mdia.hdlr.type == BOX_SOUN) {
+
+      if ((ret = mem_alloc(&trak, sizeof(* trak))) != 0)
+        return ret;
+
+      * trak = moov->trak[i];
+
+      for (j = 0; j < moov->trak_len; j++)
+        if (j != i)
+          free_trak(&moov->trak[j]);
+      mem_free(moov->trak);
+
+      trak->tkhd.track_id = 1;
+      moov->trak_len = 1;
+      moov->trak = trak;
+      moov->mvhd.next_track_id = 2;
+      return ret;
+    }
+  }
+  return ERR_NO_SOUN;
+}
+
 int
 main(int argc, char ** argv) {
-  const char * fname;
+  const char * input;
+  const char * output;
   FILE * file;
-  struct box_info info;
   struct box_top top;
   int ret;
 
-  (void) argc;
-  (void) argv;
+  ret = 0;
 
-  /* open file */
-  fname = "standbyme.mp4";
-  if ((ret = open_file(&file, &info, &top, fname)) != 0)
+  if (argc == 0)
     goto exit;
 
-  if ((ret = read_file(file, &info, &top)) != 0 ||
-      (ret = write_file(&top, "output.mp4")) != 0)
+  if (argc == 1 || argc >= 4) {
+    printf("%s <INPUT> <OUTPUT>\n", argv[0]);
+    goto exit;
+  }
+
+  if (argc >= 2)
+    input = argv[1];
+
+  if (argc >= 3)
+    output = argv[2];
+  else
+    output = NULL;
+
+  if ((ret = open_file(&file, input)) != 0)
+    goto exit;
+
+  if ((ret = read_top(file, &top)) != 0)
     goto close;
 
+  if (output != NULL)
+    if ((ret = extract_audio(&top)) != 0 ||
+        (ret = write_top(&top, output)) != 0)
+      goto free;
+
+free:
+  free_top(&top);
 close:
-  close_file(file, &top);
+  close_file(file);
 exit:
   if (ret)
     printf("Error: %s\n", err_to_str(ret));
