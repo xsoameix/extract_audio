@@ -90,6 +90,7 @@ enum {
   BOX_MP4A = MKBOX('m', 'p', '4', 'a'),
   BOX_ESDS = MKBOX('e', 's', 'd', 's'),
   BOX_STTS = MKBOX('s', 't', 't', 's'),
+  BOX_CTTS = MKBOX('c', 't', 't', 's'),
   BOX_STSC = MKBOX('s', 't', 's', 'c'),
   BOX_STCO = MKBOX('s', 't', 'c', 'o'),
   BOX_STSZ = MKBOX('s', 't', 's', 'z'),
@@ -107,6 +108,7 @@ union box {
   struct box_ftyp * ftyp;
   struct box_moov * moov;
   struct box_trak * trak;
+  struct box_edts * edts;
   struct box_mdia * mdia;
   struct box_minf * minf;
   struct box_dinf * dinf;
@@ -254,6 +256,7 @@ struct sps {
   unsigned char seq_para_set_id;
   unsigned char log2_max_frame_num_minus4;
   unsigned char pic_order_cnt_type;
+  unsigned char log2_max_pic_order_cnt_lsb_minus4;
   unsigned int max_num_ref_frames;
   unsigned char gaps_in_frame_num_value_allowed_flag;
   unsigned int pic_width_in_mbs_minus_1;
@@ -380,6 +383,16 @@ struct box_stts {
   struct stts_entry * entry;
 };
 
+struct ctts_entry {
+  unsigned int sample_count;
+  unsigned int sample_offset;
+};
+
+struct box_ctts {
+  unsigned int entry_count;
+  struct ctts_entry * entry;
+};
+
 struct stsc_entry {
   unsigned int first_chunk;
   unsigned int samples_per_chunk;
@@ -425,6 +438,7 @@ struct box_stss {
 struct box_stbl {
   struct box_stsd stsd;
   struct box_stts stts;
+  struct box_ctts ctts;
   struct box_stsc stsc;
   struct box_stco stco;
   struct box_stsz stsz;
@@ -446,6 +460,22 @@ struct box_minf {
   box_t hd;
 };
 
+struct elst_entry {
+  unsigned int segment_duration;
+  int media_time;
+  short media_rate_integer;
+  short media_rate_fraction;
+};
+
+struct box_elst {
+  unsigned int entry_count;
+  struct elst_entry * entry;
+};
+
+struct box_edts {
+  struct box_elst elst;
+};
+
 struct box_mdia {
   struct box_mdhd mdhd;
   struct box_hdlr hdlr;
@@ -454,6 +484,7 @@ struct box_mdia {
 
 struct box_trak {
   struct box_tkhd tkhd;
+  struct box_edts edts;
   struct box_mdia mdia;
 };
 
@@ -817,8 +848,8 @@ read_ver(unsigned char * version, unsigned int * flags, FILE * file) {
   * flags = b32 & 0x00ffffff;
 
 #if 0
-  attr("version:"); printf("%u\n", * version);
-  attr("flags:"); printf("%u\n", * flags);
+  attr("version"); printf("%u\n", * version);
+  attr("flags"); printf("%u\n", * flags);
 #endif
 
   return 0;
@@ -1209,15 +1240,19 @@ read_elst(FILE * file, struct box_info * info, box_t p_box) {
   int media_time;
   short media_rate_integer;
   short media_rate_fraction;
+  struct elst_entry * entry;
+  struct box_elst * elst;
   unsigned int i;
   int ret;
 
   (void) info;
-  (void) p_box;
+
+  ret = 0;
 
   if ((ret = read_ver(&version, &flags, file)) != 0 ||
-      (ret = read_u32(&entry_count, file)) != 0)
-    return ret;
+      (ret = read_u32(&entry_count, file)) != 0 ||
+      (ret = mem_alloc(&entry, entry_count * sizeof(* entry))) != 0)
+    goto exit;
 
   ATTR_U(entry_count);
 
@@ -1226,14 +1261,27 @@ read_elst(FILE * file, struct box_info * info, box_t p_box) {
         (ret = read_s32(&media_time, file)) != 0 ||
         (ret = read_s16(&media_rate_integer, file)) != 0 ||
         (ret = read_s16(&media_rate_fraction, file)) != 0)
-      return ret;
+      goto free;
+
+    entry[i].segment_duration = segment_duration;
+    entry[i].media_time = media_time;
+    entry[i].media_rate_integer = media_rate_integer;
+    entry[i].media_rate_fraction = media_rate_fraction;
 
     ATTR_U(segment_duration);
     ATTR_S(media_time);
     ATTR_S(media_rate_integer);
     ATTR_S(media_rate_fraction);
   }
-  return 0;
+
+  elst = &p_box.edts->elst;
+  elst->entry_count = entry_count;
+  elst->entry = entry;
+free:
+  if (ret)
+    mem_free(entry);
+exit:
+  return ret;
 }
 
 static int
@@ -1242,7 +1290,9 @@ read_edts(FILE * file, struct box_info * info, box_t p_box) {
     {BOX_ELST, 0, BOX_QTY_0_OR_1, read_elst},
     {0, 0, 0, NULL}
   };
-  return read_box(file, info, p_box, funcs);
+  box_t box;
+  box.edts = &p_box.trak->edts;
+  return read_box(file, info, box, funcs);
 }
 
 static int
@@ -1952,6 +2002,7 @@ read_nalu(union nalu ret_nalu, unsigned int size, FILE * file) {
     unsigned char seq_para_set_id; /* seq parameter set id */
     unsigned char log2_max_frame_num_minus4; /* MaxFrameNum used in frame_num */
     unsigned char pic_order_cnt_type; /* to decode picture order count */
+    unsigned char log2_max_pic_order_cnt_lsb_minus4;
     unsigned int max_num_ref_frames;
     unsigned char gaps_in_frame_num_value_allowed_flag;
     unsigned int pic_width_in_mbs_minus_1;
@@ -1995,7 +2046,12 @@ read_nalu(union nalu ret_nalu, unsigned int size, FILE * file) {
     ATTR_U(log2_max_frame_num_minus4);
     ATTR_U(pic_order_cnt_type);
 
-    if (pic_order_cnt_type == 2) {
+    if (pic_order_cnt_type == 0) {
+      if ((ret = read_code_8(&log2_max_pic_order_cnt_lsb_minus4, &bits)) != 0)
+        goto free;
+
+      ATTR_U(log2_max_pic_order_cnt_lsb_minus4);
+    } else if (pic_order_cnt_type == 2) {
     } else {
       ret = ERR_UNK_PIC_ORDER_CNT_TYPE;
       goto free;
@@ -2067,19 +2123,30 @@ read_nalu(union nalu ret_nalu, unsigned int size, FILE * file) {
     sps->seq_para_set_id = seq_para_set_id;
     sps->log2_max_frame_num_minus4 = log2_max_frame_num_minus4;
     sps->pic_order_cnt_type = pic_order_cnt_type;
+
+    if (pic_order_cnt_type == 0)
+      sps->log2_max_pic_order_cnt_lsb_minus4 =
+          log2_max_pic_order_cnt_lsb_minus4;
+
     sps->max_num_ref_frames = max_num_ref_frames;
     sps->gaps_in_frame_num_value_allowed_flag =
         gaps_in_frame_num_value_allowed_flag;
     sps->pic_width_in_mbs_minus_1 = pic_width_in_mbs_minus_1;
     sps->pic_height_in_mbs_minus_1 = pic_height_in_mbs_minus_1;
     sps->frame_mbs_only_flag = frame_mbs_only_flag;
-    sps->mb_adaptive_frame_field_flag = mb_adaptive_frame_field_flag;
+
+    if (!frame_mbs_only_flag)
+      sps->mb_adaptive_frame_field_flag = mb_adaptive_frame_field_flag;
+
     sps->direct_8x8_inference_flag = direct_8x8_inference_flag;
     sps->frame_cropping_flag = frame_cropping_flag;
-    sps->frame_crop_left_offset = frame_crop_left_offset;
-    sps->frame_crop_right_offset = frame_crop_right_offset;
-    sps->frame_crop_top_offset = frame_crop_top_offset;
-    sps->frame_crop_bottom_offset = frame_crop_bottom_offset;
+
+    if (frame_cropping_flag) {
+      sps->frame_crop_left_offset = frame_crop_left_offset;
+      sps->frame_crop_right_offset = frame_crop_right_offset;
+      sps->frame_crop_top_offset = frame_crop_top_offset;
+      sps->frame_crop_bottom_offset = frame_crop_bottom_offset;
+    }
     sps->vui_para_present_flag = vui_para_present_flag;
   } else if (nal_unit_type == NAL_PPS) {
     unsigned char pic_para_set_id;
@@ -2793,6 +2860,61 @@ exit:
 }
 
 static int
+read_ctts(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned char version;
+  unsigned int flags;
+  unsigned int entry_count;
+  unsigned int sample_count;
+  unsigned int sample_offset;
+  struct ctts_entry * entry;
+  struct box_ctts * ctts;
+  unsigned int i;
+  int ret;
+
+  (void) info;
+
+  ret = 0;
+
+  if ((ret = read_ver(&version, &flags, file)) != 0 ||
+      (ret = read_u32(&entry_count, file)) != 0 ||
+      (ret = mem_alloc(&entry, entry_count * sizeof(* entry))) != 0)
+    goto exit;
+
+  ATTR_U(entry_count);
+
+  for (i = 0; i < entry_count; i++) {
+    if ((ret = read_u32(&sample_count, file)) != 0 ||
+        (ret = read_u32(&sample_offset, file)) != 0)
+      goto free;
+
+    entry[i].sample_count = sample_count;
+    entry[i].sample_offset = sample_offset;
+
+    if (entry_count <= 8 ||
+        i < 4 || i >= entry_count - 4) {
+      indent(0); printf("[%u]\n", i);
+      indent(1);
+
+      ATTR_U(sample_count);
+      ATTR_U(sample_offset);
+
+      indent(-1);
+    } else if (i == 4) {
+      indent(0); printf("[...]\n");
+    }
+  }
+
+  ctts = &p_box.mdia->minf.stbl.ctts;
+  ctts->entry_count = entry_count;
+  ctts->entry = entry;
+free:
+  if (ret)
+    mem_free(entry);
+exit:
+  return ret;
+}
+
+static int
 read_stsc(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char version;
   unsigned int flags;
@@ -3087,6 +3209,7 @@ read_stbl(FILE * file, struct box_info * info, box_t p_box) {
   struct box_func funcs[] = {
     {BOX_STSD, 0, BOX_QTY_1,      read_stsd},
     {BOX_STTS, 0, BOX_QTY_1,      read_stts},
+    {BOX_CTTS, 0, BOX_QTY_0_OR_1, read_ctts},
     {BOX_STSC, 0, BOX_QTY_1,      read_stsc},
     {BOX_STCO, 0, BOX_QTY_1,      read_stco},
     {BOX_STSZ, 0, BOX_QTY_1,      read_stsz},
@@ -3204,6 +3327,8 @@ read_mdia(FILE * file, struct box_info * info, box_t p_box) {
 
 static void
 init_trak(struct box_trak * trak) {
+  trak->edts.elst.entry = NULL;
+  trak->edts.elst.entry_count = 0;
   trak->mdia.hdlr.name = NULL;
   trak->mdia.hdlr.type = BOX_NIL;
   trak->mdia.minf.dinf.dref.entry = NULL;
@@ -3211,6 +3336,8 @@ init_trak(struct box_trak * trak) {
   trak->mdia.minf.stbl.stsd.entry.vide = NULL;
   trak->mdia.minf.stbl.stsd.entry_count = 0;
   trak->mdia.minf.stbl.stts.entry = NULL;
+  trak->mdia.minf.stbl.ctts.entry = NULL;
+  trak->mdia.minf.stbl.ctts.entry_count = 0;
   trak->mdia.minf.stbl.stsc.entry = NULL;
   trak->mdia.minf.stbl.stco.entry = NULL;
   trak->mdia.minf.stbl.stsz.entry = NULL;
@@ -3223,6 +3350,7 @@ static void
 free_trak(struct box_trak * trak) {
   unsigned int i;
 
+  mem_free(trak->edts.elst.entry);
   mem_free(trak->mdia.hdlr.name);
 
   for (i = 0; i < trak->mdia.minf.dinf.dref.entry_count; i++)
@@ -3240,6 +3368,7 @@ free_trak(struct box_trak * trak) {
   }
 
   mem_free(trak->mdia.minf.stbl.stts.entry);
+  mem_free(trak->mdia.minf.stbl.ctts.entry);
   mem_free(trak->mdia.minf.stbl.stsc.entry);
   mem_free(trak->mdia.minf.stbl.stco.entry);
   mem_free(trak->mdia.minf.stbl.stsz.entry);
@@ -4152,8 +4281,15 @@ write_nalu(union nalu arg_nalu, FILE * file) {
         (ret = write_bits(sps->level_idc, 8, &bits)) != 0 ||
         (ret = write_code(sps->seq_para_set_id, &bits)) != 0 ||
         (ret = write_code(sps->log2_max_frame_num_minus4, &bits)) != 0 ||
-        (ret = write_code(sps->pic_order_cnt_type, &bits)) != 0 ||
-        (ret = write_code(sps->max_num_ref_frames, &bits)) != 0 ||
+        (ret = write_code(sps->pic_order_cnt_type, &bits)) != 0)
+      goto free;
+
+    if (sps->pic_order_cnt_type == 0)
+      if ((ret = write_code(sps->log2_max_pic_order_cnt_lsb_minus4,
+                            &bits)) != 0)
+        goto free;
+
+    if ((ret = write_code(sps->max_num_ref_frames, &bits)) != 0 ||
         (ret = write_bit(sps->gaps_in_frame_num_value_allowed_flag,
                          &bits)) != 0 ||
         (ret = write_code(sps->pic_width_in_mbs_minus_1, &bits)) != 0 ||
@@ -4503,6 +4639,24 @@ write_stts(FILE * file, box_t p_box) {
 }
 
 static int
+write_ctts(FILE * file, box_t p_box) {
+  struct box_ctts * ctts;
+  unsigned int i;
+  int ret;
+
+  ctts = &p_box.mdia->minf.stbl.ctts;
+  if ((ret = write_ver(0, 0, file)) != 0 ||
+      (ret = write_u32(ctts->entry_count, file)) != 0)
+    return ret;
+
+  for (i = 0; i < ctts->entry_count; i++)
+    if ((ret = write_u32(ctts->entry[i].sample_count, file)) != 0 ||
+        (ret = write_u32(ctts->entry[i].sample_offset, file)) != 0)
+      return ret;
+  return 0;
+}
+
+static int
 write_stsc(FILE * file, box_t p_box) {
   struct box_stsc * stsc;
   unsigned int i;
@@ -4579,8 +4733,14 @@ write_stbl(FILE * file, box_t p_box) {
   stbl = &p_box.mdia->minf.stbl;
 
   if ((ret = write_box(file, p_box, BOX_STSD, write_stsd)) != 0 ||
-      (ret = write_box(file, p_box, BOX_STTS, write_stts)) != 0 ||
-      (ret = write_box(file, p_box, BOX_STSC, write_stsc)) != 0 ||
+      (ret = write_box(file, p_box, BOX_STTS, write_stts)) != 0)
+    return ret;
+
+  if (stbl->ctts.entry_count)
+    if ((ret = write_box(file, p_box, BOX_CTTS, write_ctts)) != 0)
+      return ret;
+
+  if ((ret = write_box(file, p_box, BOX_STSC, write_stsc)) != 0 ||
       (ret = write_box(file, p_box, BOX_STCO, write_stco)) != 0 ||
       (ret = write_box(file, p_box, BOX_STSZ, write_stsz)) != 0)
     return ret;
@@ -4647,6 +4807,33 @@ write_minf(FILE * file, box_t p_box) {
 }
 
 static int
+write_elst(FILE * file, box_t p_box) {
+  struct box_elst * elst;
+  unsigned int i;
+  int ret;
+
+  elst = &p_box.edts->elst;
+  if ((ret = write_ver(0, 0, file)) != 0 ||
+      (ret = write_u32(elst->entry_count, file)) != 0)
+    return ret;
+
+  for (i = 0; i < elst->entry_count; i++)
+    if ((ret = write_u32(elst->entry[i].segment_duration, file)) != 0 ||
+        (ret = write_s32(elst->entry[i].media_time, file)) != 0 ||
+        (ret = write_s16(elst->entry[i].media_rate_integer, file)) != 0 ||
+        (ret = write_s16(elst->entry[i].media_rate_fraction, file)) != 0)
+      return ret;
+  return 0;
+}
+
+static int
+write_edts(FILE * file, box_t p_box) {
+  box_t box;
+  box.edts = &p_box.trak->edts;
+  return write_box(file, box, BOX_ELST, write_elst);
+}
+
+static int
 write_mdia(FILE * file, box_t p_box) {
   box_t box;
   int ret;
@@ -4661,10 +4848,19 @@ write_mdia(FILE * file, box_t p_box) {
 
 static int
 write_trak(FILE * file, box_t box) {
+  struct box_trak * trak;
   int ret;
 
-  if ((ret = write_box(file, box, BOX_TKHD, write_tkhd)) != 0 ||
-      (ret = write_box(file, box, BOX_MDIA, write_mdia)) != 0)
+  trak = box.trak;
+
+  if ((ret = write_box(file, box, BOX_TKHD, write_tkhd)) != 0)
+    return ret;
+
+  if (trak->edts.elst.entry_count)
+    if ((ret = write_box(file, box, BOX_EDTS, write_edts)) != 0)
+      return ret;
+
+  if ((ret = write_box(file, box, BOX_MDIA, write_mdia)) != 0)
     return ret;
   return 0;
 }
