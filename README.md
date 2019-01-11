@@ -1,7 +1,11 @@
 # Usage
 
-    ./main <INPUT_FILE> <OUTPUT_FILE>
+    ./main [-d|--dump] <INPUT> [<OUTPUT>]
 
-eg:
+Extract audio:
 
     ./main input.mp4 output.m4a
+
+Dump file:
+
+    ./main --dump input.mp4
