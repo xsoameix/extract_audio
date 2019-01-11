@@ -601,62 +601,62 @@ print_name(const char * name, struct box_info * info) {
       putchar(' ');
 }
 
-void
+static void
 print_c24(const char * name, const char * c, struct box_info * info) {
   print_name(name, info); printf("%.3s\n", c);
 }
 
 #define PRINT_C24(name, info) print_c24(#name, (name), (info))
 
-void
+static void
 print_box(const char * name, unsigned int x, struct box_info * info) {
   char str[4];
   print_name(name, info); printf("%.4s\n", box_to_str(x, str));
 }
 
-void
+static void
 print_str(const char * name, const char * str, struct box_info * info) {
   print_name(name, info); printf("%s\n", str);
 }
 
 #define PRINT_STR(name, info) print_str(#name, (name), (info))
 
-void
+static void
 print_u(const char * name, unsigned int x, struct box_info * info) {
   print_name(name, info); printf("%u\n", x);
 }
 
 #define PRINT_U(name, info) print_u(#name, (name), (info))
 
-void
+static void
 print_s(const char * name, int s, struct box_info * info) {
   print_name(name, info); printf("%d\n", s);
 }
 
 #define PRINT_S(name, info) print_s(#name, (name), (info))
 
-void
+static void
 print_s_8(const char * name, int s, struct box_info * info) {
   print_name(name, info); printf("%d.%x\n", s >> 8, s & 0xff);
 }
 
 #define PRINT_S_8(name, info) print_s_8(#name, (name), (info))
 
-void
+static void
 print_s_16(const char * name, int s, struct box_info * info) {
   print_name(name, info); printf("%d.%x\n", s >> 16, s & 0xffff);
 }
 
 #define PRINT_S_16(name, info) print_s_16(#name, (name), (info))
 
-void
+static void
 print_u_16(const char * name, unsigned int u, struct box_info * info) {
   print_name(name, info); printf("%u.%x\n", u >> 16, u & 0xffff);
 }
 
 #define PRINT_U_16(name, info) print_u_16(#name, (name), (info))
 
-void
+static void
 print_mat(const char * name, int * matrix, struct box_info * info) {
   unsigned int i;
 
