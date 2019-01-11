@@ -3,7 +3,8 @@
 #include <string.h>
 
 enum {
-  ERR_MEM = 1,
+  ERR_ARG = 1,
+  ERR_MEM,
   ERR_IO,
   ERR_UNK_BOX,
   ERR_BOX_SIZE,
@@ -535,6 +536,7 @@ static const char *
 err_to_str(int i) {
   static const char * errors[] = {
     "",
+    "Unable to parse argument",
     "Memory error",
     "IO error",
     "Unknown box",
@@ -3601,7 +3603,7 @@ fill_stbl(struct box_top * top) {
 }
 
 static int
-read_top(FILE * file, struct box_top * top) {
+read_top(FILE * file, struct box_top * top, unsigned char dump) {
   struct box_info info;
   struct box_func funcs[] = {
     {BOX_FTYP, 0, BOX_QTY_1,      read_ftyp},
@@ -3627,7 +3629,7 @@ read_top(FILE * file, struct box_top * top) {
   info.size = (unsigned int) size;
   info.type = BOX_TOP;
   info.depth = 0;
-  info.dump = 0;
+  info.dump = dump;
 
   top->ftyp.c_brands = NULL;
   top->moov.iods = NULL;
@@ -5145,36 +5147,64 @@ extract_audio(struct box_top * top) {
   return ERR_NO_SOUN;
 }
 
+static void
+error_arg(const char * exe) {
+  fprintf(stderr, "Usage: %s [-d|--dump] <INPUT> [<OUTPUT>]\n", exe);
+}
+
+static int
+parse_args(const char ** input,
+           const char ** output,
+           unsigned char * dump, int argc, char ** argv) {
+  const char * exe;
+  const char * arg;
+  int i;
+
+  if (argc <= 0)
+    return ERR_ARG;
+
+  exe = argv[0];
+
+  * input = * output = NULL;
+  * dump = 0;
+
+  for (i = 1; i < argc; i++) {
+    arg = argv[i];
+    if (strcmp(arg, "-d") == 0 ||
+        strcmp(arg, "--dump") == 0) {
+      * dump = 1;
+    } else if (* input == NULL) {
+      * input = arg;
+    } else if (* output == NULL) {
+      * output = arg;
+    } else {
+      error_arg(exe);
+      return ERR_ARG;
+    }
+  }
+  if (* input == NULL) {
+    error_arg(exe);
+    return ERR_ARG;
+  }
+  return 0;
+}
+
 int
 main(int argc, char ** argv) {
   const char * input;
   const char * output;
+  unsigned char dump;
   FILE * file;
   struct box_top top;
   int ret;
 
   ret = 0;
 
-  if (argc == 0)
+  if ((ret = parse_args(&input, &output, &dump, argc, argv)) != 0 ||
+      (ret = open_file(&file, input)) != 0)
     goto exit;
 
-  if (argc == 1 || argc >= 4) {
-    printf("%s <INPUT> <OUTPUT>\n", argv[0]);
-    goto exit;
-  }
-
-  if (argc >= 2)
-    input = argv[1];
-
-  if (argc >= 3)
-    output = argv[2];
-  else
-    output = NULL;
-
-  if ((ret = open_file(&file, input)) != 0)
-    goto exit;
-
-  if ((ret = read_top(file, &top)) != 0)
+  if ((ret = read_top(file, &top, dump)) != 0)
     goto close;
 
   if (output != NULL)
@@ -5188,6 +5218,6 @@ close:
   close_file(file);
 exit:
   if (ret)
-    printf("Error: %s\n", err_to_str(ret));
+    fprintf(stderr, "Error: %s\n", err_to_str(ret));
   return ret;
 }
