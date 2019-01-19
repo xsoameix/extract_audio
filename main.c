@@ -33,6 +33,8 @@ enum {
   ERR_WRITE_BITS,
   ERR_BOX_QTY,
   ERR_NO_SOUN,
+  ERR_NO_SOUN_CONF,
+  ERR_CHANNEL,
   ERR_LEN
 };
 
@@ -47,6 +49,15 @@ enum {
   TAG_DEC_SPECIFIC_INFO,
   TAG_SL_CONFIG_DESCR,
   TAG_MP4_IOD = 0x10
+};
+
+enum { /* OTI = object type indication */
+  OTI_AUDIO_AAC_MPEG4 = 0x40,
+  OTI_AUDIO_AAC_MPEG2_MP = 0x66
+};
+
+static const unsigned char m4a_channels[] = {
+  1, 2, 3, 4, 5, 6, 8, 2, 3, 4, 7, 8, 24, 8, 12, 10, 12, 14
 };
 
 enum {
@@ -334,6 +345,7 @@ struct audio_specific_config {
   unsigned char sampling_frequency_index;
   unsigned int sampling_frequency;
   unsigned char channel_configuration;
+  unsigned char channels;
 };
 
 struct decoder_config_descr {
@@ -565,7 +577,9 @@ err_to_str(int i) {
     "Unable to write bit",
     "Unable to write bits",
     "Illegal quantity of box",
-    "No sound track"
+    "No sound track",
+    "No sound configuration",
+    "Illegal number of channels"
   };
   if (i < 0 || i >= ERR_LEN)
     return NULL;
@@ -2553,7 +2567,7 @@ id_to_codec(unsigned char * ret_codec, unsigned char id) {
     unsigned char codec;
   };
   struct pair pairs[] = {
-    {0x40, CODEC_AAC} /* Audio ISO/IEC 14496-3 */
+    {OTI_AUDIO_AAC_MPEG4, CODEC_AAC} /* Audio ISO/IEC 14496-3 */
   };
   unsigned int i;
 
@@ -2591,6 +2605,7 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
   unsigned char sampling_frequency_index;
   unsigned int sampling_frequency;
   unsigned char channel_configuration;
+  unsigned char channels;
 
   unsigned char predefined;
 
@@ -2721,6 +2736,13 @@ read_esds(FILE * file, struct box_info * info, box_t p_box) {
 
     if (info->dump)
       PRINT_U(channel_configuration, info);
+
+    if (channel_configuration) {
+      channels = m4a_channels[channel_configuration-1];
+    } else {
+      ret = ERR_CHANNEL;
+      goto free;
+    }
 free:
     mem_free(bytes);
     if (ret)
@@ -2775,6 +2797,7 @@ free:
   audio->sampling_frequency_index = sampling_frequency_index;
   audio->sampling_frequency = sampling_frequency;
   audio->channel_configuration = channel_configuration;
+  audio->channels = channels;
 
   sl = &es->sl_conf;
   sl->predefined = predefined;
@@ -4557,7 +4580,6 @@ write_esds(FILE * file, box_t p_box) {
   struct audio_specific_config * audio;
 
   struct bits bits;
-  unsigned char * bytes;
   unsigned char codec;
   unsigned int buffer_size_db;
   unsigned int i;
@@ -4601,13 +4623,13 @@ write_esds(FILE * file, box_t p_box) {
 
   if (codec == CODEC_AAC) {
 
-    if ((ret = mem_alloc(&bytes, audio->tag_len)) != 0)
+    if ((ret = mem_alloc(&bits.bytes, audio->tag_len)) != 0)
       return ret;
 
     for (i = 0; i < audio->tag_len; i++)
-      bytes[i] = 0;
+      bits.bytes[i] = 0;
 
-    if ((ret = write_bits_init(&bits, bytes, audio->tag_len)) != 0)
+    if ((ret = write_bits_init(&bits, bits.bytes, audio->tag_len)) != 0)
       goto free;
 
     if (audio->audio_object_type >= 0x20) {
@@ -5112,6 +5134,96 @@ exit:
 }
 
 static int
+write_raw(struct box_top * top, const char * fname) {
+  FILE * file;
+  FILE * sample_file;
+  struct box_stbl * stbl;
+  struct box_stsd * stsd;
+  struct box_stsz * stsz;
+  struct decoder_config_descr * dec;
+  struct bits b;
+  unsigned char header[7]; /* ADTS header size = 7 if protection_absent = 1 */
+  unsigned char version;
+  unsigned char profile;
+  unsigned char sampling_frequency_index;
+  unsigned char channels;
+  unsigned char * sample;
+  unsigned int sample_capa;
+  unsigned int sample_size;
+  unsigned int i;
+  int ret;
+
+  file = fopen(fname, "wb");
+  if (file == NULL) {
+    ret = ERR_IO;
+    goto exit;
+  }
+
+  sample_file = top->mdat.file;
+
+  stbl = &top->moov.trak[0].mdia.minf.stbl;
+  stsd = &stbl->stsd;
+  stsz = &stbl->stsz;
+
+  if (stsd->entry_count == 0) {
+    ret = ERR_NO_SOUN_CONF;
+    goto close;
+  }
+
+  dec = &stsd->entry.soun[0].esds.es.dec_conf;
+  if (dec->object_type_idc == OTI_AUDIO_AAC_MPEG4) {
+    version = 0;
+    profile = (unsigned char) (dec->audio.audio_object_type - 1);
+  } else {
+    version = 1;
+    profile = (unsigned char) (dec->object_type_idc - OTI_AUDIO_AAC_MPEG2_MP);
+  }
+  sampling_frequency_index = dec->audio.sampling_frequency_index;
+  channels = dec->audio.channels;
+
+  sample_capa = 1;
+  for (i = 0; i < stsz->sample_count; i++)
+    if (stsz->entry[i].entry_size > sample_capa)
+      sample_capa = stsz->entry[i].entry_size;
+
+  if ((ret = mem_alloc(&sample, sample_capa)) != 0)
+    goto close;
+
+  for (i = 0; i < stsz->sample_count; i++) {
+
+    sample_size = stsz->entry[i].entry_size;
+
+    if ((ret = write_bits_init(&b, header, sizeof(header))) != 0 ||
+        (ret = write_bits(0xfff, 12, &b)) != 0 || /* sync */
+        (ret = write_bit(version, &b)) != 0 ||
+        (ret = write_bits(0, 2, &b)) != 0 || /* layer */
+        (ret = write_bit(1, &b)) != 0 || /* protection_absent */
+        (ret = write_bits(profile, 2, &b)) != 0 ||
+        (ret = write_bits(sampling_frequency_index, 4, &b)) != 0 ||
+        (ret = write_bit(0, &b)) != 0 || /* private stream */
+        (ret = write_bits(channels, 3, &b)) != 0 ||
+        (ret = write_bits(0, 4, &b)) != 0 || /* originality */
+        (ret = write_bits(7+sample_size, 13, &b)) != 0 ||
+        (ret = write_bits(0x7ff, 11, &b)) != 0 || /* buffer fullness */
+        (ret = write_bits(0, 2, &b)) != 0 || /* number of aac frame - 1 */
+        (ret = write_bits_flush(&b)) != 0 ||
+        (ret = write_ary(b.bytes, b.i, 1, file)) != 0)
+      goto free;
+
+    if ((ret = set_pos(stsz->entry[i].pos, sample_file)) != 0 ||
+        (ret = read_ary(sample, sample_size, 1, sample_file)) != 0 ||
+        (ret = write_ary(sample, sample_size, 1, file)) != 0)
+      goto free;
+  }
+free:
+  mem_free(sample);
+close:
+  fclose(file);
+exit:
+  return ret;
+}
+
+static int
 extract_audio(struct box_top * top) {
   struct box_moov * moov;
   struct box_trak * trak;
@@ -5149,13 +5261,14 @@ extract_audio(struct box_top * top) {
 
 static void
 error_arg(const char * exe) {
-  fprintf(stderr, "Usage: %s [-d|--dump] <INPUT> [<OUTPUT>]\n", exe);
+  fprintf(stderr, "Usage: %s [-d|--dump|-r|--raw] <INPUT> [<OUTPUT>]\n", exe);
 }
 
 static int
 parse_args(const char ** input,
            const char ** output,
-           unsigned char * dump, int argc, char ** argv) {
+           unsigned char * dump,
+           unsigned char * raw, int argc, char ** argv) {
   const char * exe;
   const char * arg;
   int i;
@@ -5166,13 +5279,16 @@ parse_args(const char ** input,
   exe = argv[0];
 
   * input = * output = NULL;
-  * dump = 0;
+  * dump = * raw = 0;
 
   for (i = 1; i < argc; i++) {
     arg = argv[i];
     if (strcmp(arg, "-d") == 0 ||
         strcmp(arg, "--dump") == 0) {
       * dump = 1;
+    } else if (strcmp(arg, "-r") == 0 ||
+               strcmp(arg, "--raw") == 0) {
+      * raw = 1;
     } else if (* input == NULL) {
       * input = arg;
     } else if (* output == NULL) {
@@ -5194,23 +5310,33 @@ main(int argc, char ** argv) {
   const char * input;
   const char * output;
   unsigned char dump;
+  unsigned char raw;
   FILE * file;
   struct box_top top;
   int ret;
 
   ret = 0;
 
-  if ((ret = parse_args(&input, &output, &dump, argc, argv)) != 0 ||
+  if ((ret = parse_args(&input, &output, &dump, &raw, argc, argv)) != 0 ||
       (ret = open_file(&file, input)) != 0)
     goto exit;
 
   if ((ret = read_top(file, &top, dump)) != 0)
     goto close;
 
-  if (output != NULL)
-    if ((ret = extract_audio(&top)) != 0 ||
-        (ret = write_top(&top, output)) != 0)
+  if (output != NULL) {
+
+    if ((ret = extract_audio(&top)) != 0)
       goto free;
+
+    if (raw) {
+      if ((ret = write_raw(&top, output)) != 0)
+        goto free;
+    } else {
+      if ((ret = write_top(&top, output)) != 0)
+        goto free;
+    }
+  }
 
 free:
   free_top(&top);
