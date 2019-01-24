@@ -109,6 +109,7 @@ enum {
   BOX_STSS = MKBOX('s', 't', 's', 's'),
   BOX_SGPD = MKBOX('s', 'g', 'p', 'd'),
   BOX_SBGP = MKBOX('s', 'b', 'g', 'p'),
+  BOX_BTRT = MKBOX('b', 't', 'r', 't'),
   BOX_VMHD = MKBOX('v', 'm', 'h', 'd'),
   BOX_SMHD = MKBOX('s', 'm', 'h', 'd'),
   BOX_MDAT = MKBOX('m', 'd', 'a', 't'),
@@ -2459,6 +2460,28 @@ exit:
   return ret;
 }
 
+static int
+read_btrt(FILE * file, struct box_info * info, box_t p_box) {
+  unsigned int buffer_size_db;
+  unsigned int max_bitrate;
+  unsigned int avg_bitrate;
+  int ret;
+
+  (void) p_box;
+
+  if ((ret = read_u32(&buffer_size_db, file)) != 0 ||
+      (ret = read_u32(&max_bitrate, file)) != 0 ||
+      (ret = read_u32(&avg_bitrate, file)) != 0)
+    return ret;
+
+  if (info->dump) {
+    PRINT_U(buffer_size_db, info);
+    PRINT_U(max_bitrate, info);
+    PRINT_U(avg_bitrate, info);
+  }
+  return 0;
+}
+
 static void
 init_vide(struct box_vide * vide) {
   vide->avcc.sps.sps = NULL;
@@ -2483,7 +2506,8 @@ read_vide(FILE * file, struct box_info * info, box_t p_box) {
   char compressorname[32];
   unsigned short depth;
   struct box_func funcs[] = {
-    {BOX_AVCC, 0, BOX_QTY_1, read_avcc},
+    {BOX_AVCC, 0, BOX_QTY_1,      read_avcc},
+    {BOX_BTRT, 0, BOX_QTY_0_OR_1, read_btrt},
     {0, 0, 0, NULL}
   };
   struct box_stsd * stsd;
